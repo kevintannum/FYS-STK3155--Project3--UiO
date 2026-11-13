@@ -67,7 +67,7 @@ def aggregate(X_events):
 
     X_agg = pd.get_dummies(
         X_agg,
-        columns=["mission_id"],
+        columns=["mission_id", "c_object_type"],
         dtype=int
     )
 
