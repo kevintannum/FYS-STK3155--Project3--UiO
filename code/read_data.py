@@ -25,3 +25,50 @@ def ImportTrainingData():
         event_ids.append(event_id)
 
     return X_events, y
+
+def aggregate(X_events):
+    X_agg = []
+
+    all_num = pd.concat([
+        event.select_dtypes(include="number")
+        for event in X_events
+    ])
+
+    constant = []
+    varying = []
+
+    for col in all_num.columns: # check which are constant and not
+        changes = any(
+            event[col].nunique() > 1
+            for event in X_events
+        )
+        if changes:
+            varying.append(col)
+        else:
+            constant.append(col)
+
+    for event in X_events: # aggregate events
+        num = event.select_dtypes(include="number")
+        cat = event.select_dtypes(exclude="number")
+
+        summary = pd.concat([
+            num[constant].iloc[-1],
+            num[varying].mean().add_suffix("_mean"),
+            num[varying].std().fillna(0).add_suffix("_std"),
+            num[varying].iloc[0].add_suffix("_first"),
+            num[varying].iloc[-1].add_suffix("_last"),
+            cat.iloc[-1] # if c_object changed changed from TBA to other, keep the latter 
+        ])
+
+        summary["n_cdms"] = len(event)
+        X_agg.append(summary)
+
+    X_agg = pd.DataFrame(X_agg)
+
+    X_agg = pd.get_dummies(
+        X_agg,
+        columns=["mission_id"],
+        dtype=int
+    )
+
+    return X_agg
