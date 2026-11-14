@@ -18,7 +18,7 @@ def ImportTrainingData():
         if inputs.empty or targets.empty:
             continue
 
-        X_events.append(inputs.drop(columns=["event_id", "mission_data", "risk"])) # Add the event, event_id is stored elsewhere, risk is leakage, mission_id is superflous and leaks data
+        X_events.append(inputs.drop(columns=["event_id", "mission_id", "risk"])) # Add the event, event_id is stored elsewhere, risk is leakage, mission_id is superflous and leaks data
 
         target_risk = targets.iloc[-1]["risk"]
         y.append(int(target_risk >= -6)) # risk is 10-log
