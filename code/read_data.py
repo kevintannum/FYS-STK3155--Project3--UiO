@@ -1,4 +1,5 @@
 import pandas as pd
+from sklearn.metrics import mean_squared_error, fbeta_score
 
 def ImportTrainingData():
     train = pd.read_csv("../data/train_data.zip")
@@ -65,10 +66,14 @@ def aggregate(X_events):
 
     X_agg = pd.DataFrame(X_agg)
 
-    X_agg = pd.get_dummies(
-        X_agg,
-        columns=["mission_id", "c_object_type"],
-        dtype=int
-    )
+    X_agg = pd.get_dummies(X_agg, dtype=int)
+
+    print("hello")
 
     return X_agg
+
+def loss(y_pred, y_test):
+    mse = mean_squared_error(y_pred, y_test)
+    f2 = fbeta_score(y_pred, y_test, beta=2)
+
+    return mse/f2
