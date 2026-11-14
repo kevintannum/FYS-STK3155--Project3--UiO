@@ -18,7 +18,7 @@ def ImportTrainingData():
         if inputs.empty or targets.empty:
             continue
 
-        X_events.append(inputs.drop(columns=["event_id", "risk"])) # Add the event, event_id is stored elsewhere, risk is leakage
+        X_events.append(inputs.drop(columns=["event_id", "mission_data", "risk"])) # Add the event, event_id is stored elsewhere, risk is leakage, mission_id is superflous and leaks data
 
         target_risk = targets.iloc[-1]["risk"]
         y.append(int(target_risk >= -6)) # risk is 10-log
@@ -68,12 +68,16 @@ def aggregate(X_events):
 
     X_agg = pd.get_dummies(X_agg, dtype=int)
 
-    print("hello")
-
     return X_agg
 
-def loss(y_pred, y_test):
-    mse = mean_squared_error(y_pred, y_test)
-    f2 = fbeta_score(y_pred, y_test, beta=2)
+def loss(y_prob, y_pred, y_test):
+    mse = mean_squared_error(y_test, y_prob)
+    f2 = fbeta_score(y_test, y_pred, beta=2)
 
-    return mse/f2
+    return mse / f2 if f2 > 0 else float("inf") # common problem of only giving postive, resulting in 0-div
+
+def evaluate(model, X_test, y_test):
+    y_prob = model.predict_proba(X_test)[:, 1] 
+    y_pred = model.predict(X_test)
+
+    return loss(y_prob, y_pred, y_test)
