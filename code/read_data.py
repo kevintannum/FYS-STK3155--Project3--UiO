@@ -6,9 +6,14 @@ def ImportTrainingData():
     train = pd.read_csv("../data/train_data.zip")
     return ImportData(train)
 
-
 def ImportTestData():
     test = pd.read_csv("../data/test_data.csv")
+    private = pd.read_csv("../data/test_data_private.csv")
+
+    private = private.rename(columns={"true_risk": "risk"})
+
+    test = pd.concat([test, private], ignore_index=True)
+
     return ImportData(test)
 
 
