@@ -1,14 +1,22 @@
 import pandas as pd
 from sklearn.metrics import mean_squared_error, fbeta_score
+import numpy as np
 
 def ImportTrainingData():
     train = pd.read_csv("../data/train_data.zip")
+    return ImportData(train)
 
+
+def ImportTestData():
+    test = pd.read_csv("../data/test_data.csv")
+    return ImportData(test)
+
+
+def ImportData(data):
     X_events = []
     y = []
-    event_ids = []
 
-    for event_id, group in train.groupby("event_id"): # Slight help by ChatGPT
+    for event_id, group in data.groupby("event_id"):
 
         group = group.sort_values("time_to_tca", ascending=False)
 
@@ -18,12 +26,12 @@ def ImportTrainingData():
         if inputs.empty or targets.empty:
             continue
 
-        X_events.append(inputs.drop(columns=["event_id", "mission_id", "risk"])) # Add the event, event_id is stored elsewhere, risk is leakage, mission_id is superflous and leaks data
+        X_events.append(
+            inputs.drop(columns=["event_id", "mission_id", "risk"])
+        )
 
         target_risk = targets.iloc[-1]["risk"]
-        y.append(int(target_risk >= -6)) # risk is 10-log
-
-        event_ids.append(event_id)
+        y.append(int(target_risk >= -6))
 
     return X_events, y
 
@@ -68,16 +76,25 @@ def aggregate(X_events):
 
     X_agg = pd.get_dummies(X_agg, dtype=int)
 
+    cov_cols = [
+        col for col in X_agg.columns
+        if "position_covariance_det" in col
+    ]
+
+    X_agg[cov_cols] = np.sign(X_agg[cov_cols]) * np.log1p(
+        np.abs(X_agg[cov_cols])
+    )
+
     return X_agg
 
-def loss(y_prob, y_pred, y_test):
+def cost(y_prob, y_pred, y_test):
     mse = mean_squared_error(y_test, y_prob)
     f2 = fbeta_score(y_test, y_pred, beta=2)
 
     return mse / f2 if f2 > 0 else float("inf") # common problem of only giving postive, resulting in 0-div
 
-def evaluate(model, X_test, y_test):
-    y_prob = model.predict_proba(X_test)[:, 1] 
-    y_pred = model.predict(X_test)
+def evaluate(model, X_test, y_test, threshold = 0.01):
+    y_prob = model.predict_proba(X_test)[:, 1]
+    y_pred = (y_prob >= threshold).astype(int)
 
-    return loss(y_prob, y_pred, y_test)
+    return cost(y_prob, y_pred, y_test)
