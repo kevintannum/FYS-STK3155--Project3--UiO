@@ -35,6 +35,29 @@ def ImportData(data):
 
     return X_events, y
 
+def ImportData(data):
+    X_events = []
+    y = []
+
+    for event_id, group in data.groupby("event_id"):
+
+        group = group.sort_values("time_to_tca", ascending=False)
+
+        inputs = group[group["time_to_tca"] >= 2]
+        targets = group[group["time_to_tca"] < 1]
+
+        if inputs.empty or targets.empty:
+            continue
+
+        X_events.append(
+            inputs.drop(columns=["event_id", "mission_id", "risk"])
+        )
+
+        target_risk = targets.iloc[-1]["risk"]
+        y.append(target_risk)
+
+    return X_events, y
+
 def aggregate(X_events):
     X_agg = []
 
