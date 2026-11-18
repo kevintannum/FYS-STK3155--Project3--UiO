@@ -146,6 +146,9 @@ and gradient boosting.
 * `loss()` had `fbeta_score(y_pred, y_true)` — argument order swapped, which
   silently swaps precision and recall. Replaced by `kelvins_loss(y_true, y_pred)`
   with explicit thresholding; `loss()` remains as a deprecated alias.
+* Teammates' additions from upstream are kept: `ImportTestData()` (public + private test
+  files, binary target), `cost()` / `evaluate()` (MSE/F2 score) and the log of the
+  covariance determinants inside `aggregate()`.
 * Target-row selection is documented: rows are sorted by `time_to_tca`
   descending, so `targets.iloc[-1]` is the observation closest to TCA.
 * `aggregate()` kept, but new code should use `build_shared_datasets()` (above),
