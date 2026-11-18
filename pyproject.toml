@@ -1,0 +1,46 @@
+[project]
+name = "fys-stk3155-project3-uio"
+version = "0.1.0"
+description = "FYS-STK3155 Project 3: predicting satellite collision risk (ESA Collision Avoidance Challenge data)"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+
+dependencies = [
+    "numpy>=2.0,<3",
+    "pandas>=2.2,<3",
+    "scipy>=1.13",
+    "scikit-learn>=1.5",
+    "torch>=2.4",
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+    "xgboost>=2.1",
+    "ipykernel>=6.29",
+    "jupyterlab>=4.2",
+    "nbformat>=5.10",
+    "tqdm>=4.66",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "nbconvert>=7.16",
+]
+
+# ---------------------------------------------------------------------------
+# Pull the CPU-only PyTorch build on Linux/Windows. The default PyPI wheel on
+# Linux drags in ~2.5 GB of CUDA libraries that this project does not need
+# (the models are small enough to train on CPU in minutes). macOS keeps the
+# PyPI wheel, which already ships Metal/CPU support.
+# ---------------------------------------------------------------------------
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv]
+package = false
