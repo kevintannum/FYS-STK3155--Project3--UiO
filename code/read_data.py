@@ -878,7 +878,7 @@ def ImportSharedSequences(split: str = "train", **kwargs):
     data = build_shared_datasets(**kwargs)
     return data["sequences"][split], list(data["y_class"][split])
 
-def run_cv(model, X, y, cv_folds):
+def run_cv(model, X, y, cv_folds, threshold = 0.3):
     scores = []
 
     for fold, (train_idx, val_idx) in enumerate(cv_folds, 1):
@@ -886,7 +886,9 @@ def run_cv(model, X, y, cv_folds):
         model_fold.fit(X.iloc[train_idx], y[train_idx])
 
         y_prob = model_fold.predict_proba(X.iloc[val_idx])[:, 1]
-        fold_cost = cost(y[val_idx], y_prob)
+        y_pred = (y_prob >= threshold).astype(int)
+
+        fold_cost = cost(y_prob, y_pred, y[val_idx])
 
         scores.append(fold_cost)
         print(f"Fold {fold}: Cost = {fold_cost:.5f}")
