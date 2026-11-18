@@ -209,11 +209,7 @@ def ImportTestData(paths=DEFAULT_TEST_PATHS):
     ``risk`` before the two files are concatenated. Used by ``RNN_model.ipynb``.
     Not part of the shared split: never use it for model selection.
     """
-    frames = []
-    for p in paths:
-        df = pd.read_csv(p)
-        frames.append(df.rename(columns={"true_risk": "risk"}))
-    data = pd.concat(frames, ignore_index=True)
+    data = _load_official_test(paths)
 
     drop_columns = list(ID_COLUMNS) + RISK_FEATURE_COLUMNS
     X_events, y = [], []
@@ -669,18 +665,29 @@ def build_shared_datasets(
     *,
     variance_threshold: float = DEFAULT_VARIANCE_THRESHOLD,
     include_current_risk: bool = True,
-    val_size: float = 0.15,
-    test_size: float = 0.15,
+    test_paths=None,
     seed: int = 3155,
     cv_splits: int = 5,
     verbose: bool = True,
 ) -> dict:
     """Build the PCA-reduced sequence and aggregate datasets for all models.
 
+    Data roles (identical for every model):
+
+    * ``"train"`` = ALL labelled events of ``train_data.zip`` (8 293 events,
+      66 positive). It is the development set: fit, hyper-parameter selection and
+      threshold choice all happen here, by the shared ``cv_folds``.
+    * ``"test"``  = the official competition test set, ``test_data.csv``
+      (inputs, ``time_to_tca >= 2``) joined with ``test_data_private.csv``
+      (target CDM) -- 2 167 events, 150 positive. Open it ONCE, at the end. Its
+      prevalence (6.9 %) is far higher than the training set's (0.8 %).
+
+    The PCA / scaler / log-columns are fitted on ``"train"`` only.
+
     Returns
     -------
     dict with keys
-        ``splits``          : {"train"|"val"|"test": ndarray of event ids}
+        ``splits``          : {"train"|"test": positions into the internal event arrays}
         ``y_class``         : {split: int array, final_risk >= -6}
         ``y_reg``           : {split: float array, final risk}
         ``sequences``       : {split: list of DataFrame}, one time-ordered
@@ -693,8 +700,8 @@ def build_shared_datasets(
         ``aggregate_trees`` : same events, columns and PCA as ``aggregate``, but
                               the non-PCA columns are in real units (not
                               centred or scaled, NaNs kept); for XGBoost.
-        ``cv_folds``        : list of (fit_idx, val_idx) over the dev set =
-                              train rows followed by val rows; shared by all.
+        ``cv_folds``        : list of (fit_idx, val_idx) over the "train" rows;
+                              shared by all.
         ``event_meta``      : {split: DataFrame} with event_id, n_cdms,
                               last_risk (raw, from the last pre-cutoff CDM) and
                               final_risk -- for baselines and plots
@@ -704,18 +711,21 @@ def build_shared_datasets(
     from sklearn.decomposition import PCA
 
     train = load_raw(path)
+    test_raw = _load_official_test(test_paths)
+
     ids, inputs, final_risk = [], [], []
-    for event_id, inp, tgt in _iter_events(train):
-        ids.append(event_id)
-        inputs.append(inp.drop(columns=ID_COLUMNS))
-        final_risk.append(float(tgt.iloc[-1]["risk"]))
+    for frame in (train, test_raw):
+        for event_id, inp, tgt in _iter_events(frame):
+            ids.append(event_id)
+            inputs.append(inp.drop(columns=ID_COLUMNS))
+            final_risk.append(float(tgt.iloc[-1]["risk"]))
+    n_train = sum(1 for _ in _iter_events(train))
     ids = np.asarray(ids)
     y_reg = np.asarray(final_risk)
     y_class = (y_reg >= HIGH_RISK_THRESHOLD).astype(int)
 
-    # 1. one shared, stratified, event-level split
-    splits = event_level_split(ids, y_class, val_size=val_size, test_size=test_size,
-                               stratify=True, seed=seed)
+    # 1. roles: all labelled events develop the model, the official set tests it
+    splits = {"train": np.arange(n_train), "test": np.arange(n_train, len(ids))}
 
     # 2. column roles
     passthrough = list(PASSTHROUGH_COLUMNS)
@@ -806,10 +816,9 @@ def build_shared_datasets(
         aggregate_trees[name] = pd.DataFrame(np.vstack(rows_tree), columns=aggregate_columns).astype(np.float32)
         event_meta[name] = pd.DataFrame(meta)
 
-    # 5. shared cross-validation folds over the development set (train + val,
-    #    in that order). Everyone who compares models should use these.
-    y_dev = np.concatenate([y_class[splits["train"]], y_class[splits["val"]]])
-    cv_folds = shared_cv_folds(y_dev, n_splits=cv_splits, seed=seed)
+    # 5. shared cross-validation folds over the development ("train") set.
+    #    Everyone who compares models should use these.
+    cv_folds = shared_cv_folds(y_class[splits["train"]], n_splits=cv_splits, seed=seed)
 
     return {
         "splits": splits,
@@ -831,13 +840,21 @@ def build_shared_datasets(
     }
 
 
+def _load_official_test(paths=None) -> pd.DataFrame:
+    """``test_data.csv`` (inputs) + ``test_data_private.csv`` (target CDM) as one
+    long CDM table with the label column named ``risk``."""
+    frames = [pd.read_csv(p).rename(columns={"true_risk": "risk"})
+              for p in (paths or DEFAULT_TEST_PATHS)]
+    return pd.concat(frames, ignore_index=True)
+
+
 def shared_cv_folds(y_dev, n_splits: int = 5, seed: int = 3155):
-    """Stratified K-fold indices over the development set (train rows, then val rows).
+    """Stratified K-fold indices over the development ("train") set.
 
     Everyone comparing models must use the same folds, otherwise differences
     between models are partly differences between folds -- and with ~11
     positives per fold that noise is as large as the effects being measured.
-    Indices refer to ``np.concatenate([X_train, X_val])`` in that order.
+    Indices refer to the rows of the ``"train"`` datasets.
     """
     from sklearn.model_selection import StratifiedKFold
 
@@ -851,9 +868,9 @@ def ImportSharedSequences(split: str = "train", **kwargs):
 
     Same shape as :func:`ImportTrainingData` -- a list of time-ordered
     per-event DataFrames and a list of binary labels -- but PCA-reduced,
-    imputed, scaled, and restricted to one split of the shared event-level
-    split, so that train / validation / test events agree with the other
-    models. Pass ``split="val"`` or ``"test"`` for the others. Building the
+    imputed, scaled, and restricted to one split, so that the train and test
+    events agree with the other
+    models. Pass ``split="test"`` for the official test set. Building the
     datasets takes ~30 s; call :func:`build_shared_datasets` once instead if
     several splits are needed.
     """

@@ -50,32 +50,39 @@ bin/
 ## Shared data pipeline (all three models)
 
 `read_data.build_shared_datasets()` builds every representation the group uses
-from **one** event-level split, so the RNN, FFNN and XGBoost are trained and
-tested on the same events:
+from **one** definition of the data roles, so the RNN, FFNN and XGBoost are
+developed and tested on the same events:
+
+* **`"train"` = all of `train_data.zip`** (8 293 labelled events, 66 positive). This is
+  the development set: fitting, hyper-parameter selection and threshold choice all
+  happen here, by cross-validation. There is no separate validation split.
+* **`"test"` = the official competition test set**: `test_data.csv` (inputs, ≥ 2 days
+  before TCA) joined with `test_data_private.csv` (the target CDM) = 2 167 events,
+  150 positive (6.9 %, an enriched sample). Open it **once**, at the very end.
+  PCA, scaler and log columns are fitted on `"train"` only.
 
 ```python
 import numpy as np, read_data as rd
 shared = rd.build_shared_datasets()     # ~20 s; same split, PCA and folds for everyone
-y = shared["y_class"]                   # {"train","val","test"} -> 0/1 labels
+y = shared["y_class"]                   # {"train","test"} -> 0/1 labels
 ```
 
 | Who | Import | What it is |
 |---|---|---|
-| **Jon (RNN)** | `shared["sequences"]["train"]` (also `"val"`, `"test"`) | list of per-event DataFrames, CDM level, PCA-reduced. Columns: `shared["sequence_columns"]`. Drop-in for the old `X_events, y`: `rd.ImportSharedSequences("train")` |
-| **Kevin (FFNN)** | `shared["aggregate"]["train"]` | one row per event, 233 features, centred; fit a `StandardScaler` on the train rows |
+| **Jon (RNN)** | `shared["sequences"]["train"]` (also `"test"`) | list of per-event DataFrames, CDM level, PCA-reduced. Columns: `shared["sequence_columns"]`. Drop-in for the old `X_events, y`: `rd.ImportSharedSequences("train")` |
+| **Kevin (FFNN)** | `shared["aggregate"]["train"]` | one row per event, 237 features, centred; fit a `StandardScaler` on the train rows |
 | **Emil (XGBoost)** | `shared["aggregate_trees"]["train"]` | same events, columns and PCA as Kevin's, but pass-through columns (`risk`, `time_to_tca`, ...) in real units, not centred or scaled. PC scores are centred by construction |
 
-**Same validation set and folds for everyone.** The train / val / test events are
-identical in all three datasets, and model selection uses the same 5-fold
-stratified CV over the development set (train rows followed by val rows):
+**Same data and folds for everyone.** The train and test events are identical in
+all three datasets, and model selection uses the same 5-fold stratified CV over
+the `"train"` rows:
 
 ```python
 folds = shared["cv_folds"]                          # list of (fit_idx, val_idx)
-X_dev = np.vstack([X_train, X_val]); y_dev = np.concatenate([y["train"], y["val"]])
 GridSearchCV(model, grid, cv=folds, ...)            # or: for fit_idx, val_idx in folds: ...
 ```
 
-Each fold holds ~11 positives, so fold-to-fold noise is as large as most model
+Each fold holds ~13 positives, so fold-to-fold noise is as large as most model
 differences; scoring on different folds would make results incomparable. Touch
 the test split once, at the end.
 
@@ -85,14 +92,13 @@ splits:
 1. **Event filtering** — inputs are CDMs with `time_to_tca >= 2`, the target is
    read from the CDM closest to TCA (`time_to_tca < 1`); events lacking either
    side are dropped. 8 293 events survive, 66 positive (0.8 %).
-2. **Stratified 70/15/15 event-level split** (seed 3155). No event appears in
-   two splits.
+2. **Roles** (above): all labelled events develop the model, the official set tests it.
 3. **log10** on the 15 non-negative heavy-tailed columns (covariance sigmas
    and determinants; values reach 1e46 and several columns share sentinel
    maxima such as 6.38e+07).
 4. **Median imputation** and **standardisation**.
 5. **PCA on the 96 orbital-geometry / covariance columns**, keeping 95 % of
-   the variance → 48 components. PC 1 carries only 11 %, so the variance is
+   the variance → 49 components. PC 1 carries only 11 %, so the variance is
    spread thin and the PCA roughly halves this block rather than collapsing
    it. `time_to_tca`, `risk`, `max_risk_estimate`, `max_risk_scaling` and the
    two categoricals (`mission_id`, `c_object_type`, one-hot) bypass the PCA:
@@ -112,8 +118,8 @@ pass-through block (they never enter the PCA) for the ablation.
 
 ## The FFNN study
 
-* **Model selection by 5-fold stratified CV** on train+validation, because only
-  66 events (0.8 %) are positive and a single validation split holds ~10 of them.
+* **Model selection by 5-fold stratified CV** on the development set, because only
+  66 events (0.8 %) are positive and a single validation split would hold ~10 of them.
   The test split is opened once, at the end.
 
 ### Classification — `FFNN_classification.ipynb`
