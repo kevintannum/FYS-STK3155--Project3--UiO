@@ -2,6 +2,10 @@ import pandas as pd
 from sklearn.metrics import mean_squared_error, fbeta_score
 import numpy as np
 
+#filter + PCA
+# Scale
+#aggregate
+
 def ImportTrainingData():
     train = pd.read_csv("../data/train_data.zip")
     return ImportData(train)
