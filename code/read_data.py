@@ -55,6 +55,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import fbeta_score, mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.base import clone
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -876,3 +877,21 @@ def ImportSharedSequences(split: str = "train", **kwargs):
     """
     data = build_shared_datasets(**kwargs)
     return data["sequences"][split], list(data["y_class"][split])
+
+def run_cv(model, X, y, cv_folds):
+    scores = []
+
+    for fold, (train_idx, val_idx) in enumerate(cv_folds, 1):
+        model_fold = clone(model)
+        model_fold.fit(X.iloc[train_idx], y[train_idx])
+
+        y_prob = model_fold.predict_proba(X.iloc[val_idx])[:, 1]
+        cost = cost(y[val_idx], y_prob)
+
+        scores.append(cost)
+        print(f"Fold {fold}: Cost = {cost:.5f}")
+
+    mean_cost = np.mean(scores)
+    print(f"\nMean CV cost: {mean_cost:.5f}")
+
+    return mean_cost
