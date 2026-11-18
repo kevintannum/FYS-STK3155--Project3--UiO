@@ -891,9 +891,7 @@ def run_cv(model, X, y, cv_folds, threshold = 0.3):
         fold_cost = cost(y_prob, y_pred, y[val_idx])
 
         scores.append(fold_cost)
-        print(f"Fold {fold}: Cost = {fold_cost:.5f}")
 
     mean_cost = np.mean(scores)
-    print(f"\nMean CV cost: {mean_cost:.5f}")
 
     return mean_cost
