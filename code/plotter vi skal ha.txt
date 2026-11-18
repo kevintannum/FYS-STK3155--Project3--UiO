@@ -2,12 +2,40 @@ ROC curve
 AUC
 precicion- recall curve
 
-test hyperparametere:
-activation function, initialisation, for 
 
-Single wide layer: inputs: 200 hidden: 1 output
-decreasing: inputs: 100: 50: 30; 20, 1 output
 
-plot: BCE loss as a funciton of #hidden layers and #nodes per hidden layer.
-number of nodes per hidden layer: [25, 50, 75]
-number of hidden layers : [1, 2, 3]
+FOR NNS:
+    test hyperparametere:
+    activation function, initialisation, for NN with architechture: input: 100: 100: output
+        activation functions: ReLU, leakyReLU, sigmoid
+        initialization: He, xavier, lecun
+    
+    arkiteturer
+        Single wide layer: inputs: 200 hidden: 1 output
+        decreasing: inputs: 100: 50: 30: 20, 1 output
+        increasing. inputs: 20: 30: 50: 100: output
+        constant deep: 50: 50: 50: 50: output
+        big small big: inputs: 195: 10: 195: output
+        small big small: 50: 100: 50: output 
+
+    plot: BCE loss as a funciton of #hidden layers and #nodes per hidden layer.
+        number of nodes per hidden layer: [25, 50, 75]
+        number of hidden layers : [1, 2, 3]
+
+    Optimizers:
+        architechture: inputs: 100: 100: output
+        Adam
+        RMSprop
+        plain
+
+        step size: 0.001, batch size = 100, epochs = 20
+
+    Cross validation as a function of learning rate and penalty:
+        architechture: inputs: 100: 100: output
+        step sizes: [0.0001, 0.001, 0.01]
+        penalty term: [10^-5, 10^-4, 10^-3] #Det kan hende vi fordanrer disse veridene hvis det er alt for stort/lite
+
+
+
+Bare for RNNS:
+    plotte loss som funksjon av lengde av sekvenser, og plassering innenfor sekvens.
