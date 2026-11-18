@@ -886,10 +886,10 @@ def run_cv(model, X, y, cv_folds):
         model_fold.fit(X.iloc[train_idx], y[train_idx])
 
         y_prob = model_fold.predict_proba(X.iloc[val_idx])[:, 1]
-        cost = cost(y[val_idx], y_prob)
+        fold_cost = cost(y[val_idx], y_prob)
 
-        scores.append(cost)
-        print(f"Fold {fold}: Cost = {cost:.5f}")
+        scores.append(fold_cost)
+        print(f"Fold {fold}: Cost = {fold_cost:.5f}")
 
     mean_cost = np.mean(scores)
     print(f"\nMean CV cost: {mean_cost:.5f}")
