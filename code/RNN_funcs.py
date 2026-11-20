@@ -271,6 +271,18 @@ class RNNClassifier(nn.Module):
     device : str eller None
         For eksempel "cpu", "cuda" eller "mps". Hvis None velges CUDA dersom
         det er tilgjengelig, ellers CPU.
+
+    initialization : {"default", "xavier", "he", "lecun"}
+        Initialiseringsmetode for modellens vekter.
+
+        - "default": PyTorch sin standardinitialisering.
+        - "xavier": Xavier uniform for input-vekter og classifier.
+        - "he": He/Kaiming uniform for input-vekter og classifier.
+        - "lecun": LeCun uniform for input-vekter og classifier.
+
+        For ikke-default valg initialiseres recurrent-to-recurrent-vekter
+        orthogonalt, og bias settes til null.
+
     """
 
     def __init__(
@@ -282,6 +294,7 @@ class RNNClassifier(nn.Module):
         dropout=0.0,
         bidirectional=False,
         device=None,
+        initialization="default",
     ):
         super().__init__()
 
@@ -294,6 +307,22 @@ class RNNClassifier(nn.Module):
         self.input_size = input_size
         self.rnn_type = rnn_type.lower()
         self.bidirectional = bidirectional
+
+        self.initialization = initialization.lower()
+
+        valid_initializations = {
+            "default",
+            "xavier",
+            "he",
+            "lecun",
+        }
+
+        if self.initialization not in valid_initializations:
+            raise ValueError(
+                "initialization må være en av: "
+                "'default', 'xavier', 'he' eller 'lecun'."
+            )
+
 
         # Alternativ A:
         # hidden_layers=3, nodes_per_layer=64 -> [64, 64, 64]
@@ -372,6 +401,8 @@ class RNNClassifier(nn.Module):
             in_features=self.hidden_sizes[-1] * direction_factor,
             out_features=1,
         )
+
+        self._initialize_weights()
 
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -855,6 +886,67 @@ class RNNClassifier(nn.Module):
         )
 
         return (probabilities >= threshold).astype(int)
+    
+    def _initialize_weights(self):
+        """
+        Initialiserer RNN-vekter og klassifikasjonshodet.
+
+        - weight_ih_*: valgt metode.
+        - weight_hh_*: orthogonal initialisering.
+        - bias_*: null.
+        """
+        if self.initialization == "default":
+            return
+
+        for name, parameter in self.named_parameters():
+            if "weight_ih" in name:
+                if self.initialization == "xavier":
+                    nn.init.xavier_uniform_(parameter)
+
+                elif self.initialization == "he":
+                    nn.init.kaiming_uniform_(
+                        parameter,
+                        nonlinearity="relu",
+                    )
+
+                elif self.initialization == "lecun":
+                    # LeCun uniform:
+                    # U(-sqrt(3/fan_in), sqrt(3/fan_in))
+                    fan_in = parameter.size(1)
+                    bound = (3.0 / fan_in) ** 0.5
+                    nn.init.uniform_(
+                        parameter,
+                        -bound,
+                        bound,
+                    )
+
+            elif "weight_hh" in name:
+                nn.init.orthogonal_(parameter)
+
+            elif "bias" in name:
+                nn.init.zeros_(parameter)
+
+        # Klassifikasjonshodet er ikke navngitt weight_ih / weight_hh.
+        if self.initialization == "xavier":
+            nn.init.xavier_uniform_(self.classifier.weight)
+
+        elif self.initialization == "he":
+            nn.init.kaiming_uniform_(
+                self.classifier.weight,
+                nonlinearity="relu",
+            )
+
+        elif self.initialization == "lecun":
+            fan_in = self.classifier.weight.size(1)
+            bound = (3.0 / fan_in) ** 0.5
+            nn.init.uniform_(
+                self.classifier.weight,
+                -bound,
+                bound,
+            )
+
+        nn.init.zeros_(self.classifier.bias)
+
 
 def plot_confusion_matrix(
     model,
@@ -1009,7 +1101,7 @@ def plot_roc_curve(
         [0, 1],
         linestyle="--",
         color="gray",
-        label="Tilfeldig klassifikator",
+        label="Random classifier",
     )
 
     plt.xlabel("False Positive Rate")
@@ -1235,12 +1327,12 @@ def plot_rnn_architecture_heatmaps(
         fmt=".3f",
         cmap="YlOrRd",
         linewidths=0.5,
-        cbar_kws={"label": "Gjennomsnittlig validation loss"},
+        cbar_kws={"label": "Average validation loss"},
         ax=axes[0],
     )
     axes[0].set_title("CV validation loss")
     axes[0].set_xlabel("Nodes per hidden layer")
-    axes[0].set_ylabel("Antall hidden layers")
+    axes[0].set_ylabel("Number of hidden layers")
 
     sns.heatmap(
         auc_heatmap,
@@ -1250,7 +1342,7 @@ def plot_rnn_architecture_heatmaps(
         vmin=0.5,
         vmax=1.0,
         linewidths=0.5,
-        cbar_kws={"label": "Gjennomsnittlig validation ROC-AUC"},
+        cbar_kws={"label": "Average validation ROC-AUC"},
         ax=axes[1],
     )
     axes[1].set_title("CV ROC-AUC")
@@ -1272,7 +1364,7 @@ def compare_rnn_optimizers_cv(
     epochs=10,
     batch_size=32,
     learning_rates=None,
-    class_weight=10,
+    class_weight=None,
     penalty="l2",
     penalty_strength=1e-5,
     device=None,
@@ -1441,6 +1533,7 @@ def compare_rnn_optimizers_cv(
     )
 
     # Få en fast og pen rekkefølge i tabeller og plott.
+    # Angi ønsket rekkefølge.
     optimizer_order = ["adam", "rmsprop", "sgd"]
 
     summary["optimizer"] = pd.Categorical(
@@ -1449,66 +1542,92 @@ def compare_rnn_optimizers_cv(
         ordered=True,
     )
 
-    summary = summary.sort_values("optimizer").reset_index(drop=True)
+    summary = (
+        summary
+        .sort_values("optimizer")
+        .reset_index(drop=True)
+    )
 
-    # Plot gjennomsnitt med standardavvik mellom foldene.
+    # Én x-posisjon per optimizer.
+    x_positions = np.arange(len(summary))
+
+    # Standardavvik mellom CV-foldene.
+    loss_error = summary["std_val_loss"].fillna(0).to_numpy()
+    auc_error = summary["std_auc"].fillna(0).to_numpy()
+
+    # Én farge per optimizer.
+    optimizer_colors = {
+        "adam": "#EDD27D",
+        "rmsprop": "#E98B4A",
+        "sgd": "#CE3434",
+    }
+
+    colors = [
+        optimizer_colors[optimizer]
+        for optimizer in summary["optimizer"]
+    ]
+
     fig, axes = plt.subplots(
         nrows=1,
         ncols=2,
         figsize=(13, 5),
     )
 
-    sns.barplot(
-        data=summary,
-        x="optimizer",
-        y="mean_val_loss",
-        hue="optimizer",
-        palette="YlOrRd",
-        legend=False,
-        ax=axes[0],
-    )
-
-    axes[0].errorbar(
-        x=np.arange(len(summary)),
-        y=summary["mean_val_loss"],
-        yerr=summary["std_val_loss"],
-        fmt="none",
-        color="black",
+    # -------------------------------------------------
+    # Kryss-validert validation loss
+    # -------------------------------------------------
+    axes[0].bar(
+        x_positions,
+        summary["mean_val_loss"],
+        yerr=loss_error,
+        color=colors,
+        edgecolor="black",
+        width=0.45,
         capsize=5,
+        error_kw={
+            "ecolor": "black",
+            "elinewidth": 1.5,
+            "capthick": 1.5,
+        },
     )
 
-    axes[0].set_title("Kryss-validert validation loss")
+    axes[0].set_title("Cross-validated validation loss")
     axes[0].set_xlabel("Optimizer")
-    axes[0].set_ylabel("Gjennomsnittlig validation loss")
+    axes[0].set_ylabel("Average validation loss")
+    axes[0].set_xticks(x_positions)
+    axes[0].set_xticklabels(summary["optimizer"])
+    axes[0].grid(axis="y", alpha=0.3)
 
-    sns.barplot(
-        data=summary,
-        x="optimizer",
-        y="mean_auc",
-        hue="optimizer",
-        palette="YlGnBu",
-        legend=False,
-        ax=axes[1],
-    )
-
-    axes[1].errorbar(
-        x=np.arange(len(summary)),
-        y=summary["mean_auc"],
-        yerr=summary["std_auc"],
-        fmt="none",
-        color="black",
+    # -------------------------------------------------
+    # Kryss-validert ROC-AUC
+    # -------------------------------------------------
+    axes[1].bar(
+        x_positions,
+        summary["mean_auc"],
+        yerr=auc_error,
+        color=colors,
+        edgecolor="black",
+        width=0.45,
         capsize=5,
+        error_kw={
+            "ecolor": "black",
+            "elinewidth": 1.5,
+            "capthick": 1.5,
+        },
     )
 
-    axes[1].set_title("Kryss-validert ROC-AUC")
+    axes[1].set_title("Cross-validated ROC-AUC")
     axes[1].set_xlabel("Optimizer")
-    axes[1].set_ylabel("Gjennomsnittlig ROC-AUC")
+    axes[1].set_ylabel("Average ROC-AUC")
+    axes[1].set_xticks(x_positions)
+    axes[1].set_xticklabels(summary["optimizer"])
     axes[1].set_ylim(0.0, 1.0)
+    axes[1].grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
     plt.show()
-
     return results, summary
+
 
 
 def plot_learning_rate_l2_heatmaps(
@@ -1721,7 +1840,7 @@ def plot_learning_rate_l2_heatmaps(
         linewidths=0.5,
         xticklabels=lr_labels,
         yticklabels=penalty_labels,
-        cbar_kws={"label": "Gjennomsnittlig validation loss"},
+        cbar_kws={"label": "Average validation loss"},
         ax=axes[0],
     )
 
@@ -1739,7 +1858,7 @@ def plot_learning_rate_l2_heatmaps(
         linewidths=0.5,
         xticklabels=lr_labels,
         yticklabels=penalty_labels,
-        cbar_kws={"label": "Gjennomsnittlig validation ROC-AUC"},
+        cbar_kws={"label": "Average validation ROC-AUC"},
         ax=axes[1],
     )
 
@@ -2043,3 +2162,393 @@ def plot_sequence_length_vs_metrics(
     plt.show()
 
     return event_results, summary
+
+
+    import random
+
+import numpy as np
+import pandas as pd
+import torch
+import matplotlib.pyplot as plt
+
+from sklearn.metrics import roc_auc_score
+
+
+def set_seed(seed):
+    """
+    Set random seeds for more reproducible experiments.
+
+    Parameters
+    ----------
+    seed : int
+        Random seed.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def compare_initializations_cv(
+    data,
+    hidden_layers=1,
+    nodes_per_layer=25,
+    rnn_type="gru",
+    dropout=0.2,
+    epochs=10,
+    batch_size=32,
+    optimizer="adam",
+    learning_rate=1e-4,
+    class_weight=10,
+    penalty="l2",
+    penalty_strength=1e-5,
+    device=None,
+    seed=3155,
+):
+    """
+    Compare weight initialization methods using cross-validation.
+
+    The function evaluates the following initialization methods:
+
+    - "default": PyTorch's built-in initialization.
+    - "xavier": Xavier/Glorot uniform initialization.
+    - "he": He/Kaiming uniform initialization.
+    - "lecun": LeCun uniform initialization.
+
+    A new model is created and trained for every initialization method
+    and cross-validation fold.
+
+    Parameters
+    ----------
+    data : dict
+        Output from build_shared_datasets().
+    hidden_layers : int or list[int]
+        Number of recurrent layers, or a list defining hidden units
+        in each layer.
+    nodes_per_layer : int
+        Number of hidden units per layer when hidden_layers is an integer.
+    rnn_type : {"rnn", "gru", "lstm"}
+        Type of recurrent neural network.
+    dropout : float
+        Dropout probability.
+    epochs : int
+        Number of training epochs per fold.
+    batch_size : int
+        Training batch size.
+    optimizer : str
+        Optimizer name, for example "adam", "rmsprop", or "sgd".
+    learning_rate : float
+        Optimizer learning rate.
+    class_weight : float or None
+        Positive class weight for BCEWithLogitsLoss. If None, it is
+        calculated separately from the training partition in each fold.
+    penalty : {None, "l1", "l2"}
+        Type of weight regularization.
+    penalty_strength : float
+        Regularization strength.
+    device : str or None
+        Device used for training, for example "cpu", "cuda", or None.
+    seed : int
+        Base random seed.
+
+    Returns
+    -------
+    results : pd.DataFrame
+        One row per initialization method and CV fold.
+    summary : pd.DataFrame
+        Mean and standard deviation of validation loss and ROC-AUC
+        for each initialization method.
+    """
+    initialization_methods = [
+        "default",
+        "xavier",
+        "he",
+        "lecun",
+    ]
+
+    X_train = data["sequences"]["train"]
+    y_train = np.asarray(data["y_class"]["train"])
+    cv_folds = data["cv_folds"]
+    input_size = len(data["sequence_columns"])
+
+    results_rows = []
+
+    for initialization_number, initialization in enumerate(
+        initialization_methods
+    ):
+        print(
+            f"\n{'=' * 60}\n"
+            f"Testing initialization: {initialization.upper()}\n"
+            f"{'=' * 60}"
+        )
+
+        for fold_number, (fit_idx, val_idx) in enumerate(
+            cv_folds,
+            start=1,
+        ):
+            X_fit = [X_train[i] for i in fit_idx]
+            X_val = [X_train[i] for i in val_idx]
+
+            y_fit = y_train[fit_idx]
+            y_val = y_train[val_idx]
+
+            if class_weight is None:
+                n_positive = np.sum(y_fit == 1)
+                n_negative = np.sum(y_fit == 0)
+
+                current_class_weight = (
+                    n_negative / n_positive
+                    if n_positive > 0
+                    else None
+                )
+            else:
+                current_class_weight = class_weight
+
+            # Each initialization/fold combination receives a reproducible seed.
+            current_seed = (
+                seed
+                + initialization_number * 100
+                + fold_number
+            )
+            set_seed(current_seed)
+
+            model = RNNClassifier(
+                input_size=input_size,
+                hidden_layers=hidden_layers,
+                nodes_per_layer=nodes_per_layer,
+                rnn_type=rnn_type,
+                dropout=dropout,
+                initialization=initialization,
+                device=device,
+            )
+
+            model.fit(
+                X_train=X_fit,
+                y_train=y_fit,
+                X_val=X_val,
+                y_val=y_val,
+                epochs=epochs,
+                batch_size=batch_size,
+                optimizer=optimizer,
+                learning_rate=learning_rate,
+                class_weight=current_class_weight,
+                penalty=penalty,
+                penalty_strength=penalty_strength,
+                verbose=False,
+            )
+
+            final_val_loss = model.history["val_loss"][-1]
+
+            y_val_probabilities = model.predict_proba(
+                X_val,
+                batch_size=batch_size,
+            )
+
+            val_auc = roc_auc_score(
+                y_val,
+                y_val_probabilities,
+            )
+
+            results_rows.append(
+                {
+                    "initialization": initialization,
+                    "fold": fold_number,
+                    "final_val_loss": final_val_loss,
+                    "val_auc": val_auc,
+                }
+            )
+
+            print(
+                f"Fold {fold_number}/{len(cv_folds)} | "
+                f"Validation loss: {final_val_loss:.4f} | "
+                f"Validation AUC: {val_auc:.4f}"
+            )
+
+    results = pd.DataFrame(results_rows)
+
+    summary = (
+        results
+        .groupby("initialization", as_index=False)
+        .agg(
+            mean_val_loss=("final_val_loss", "mean"),
+            std_val_loss=("final_val_loss", "std"),
+            mean_auc=("val_auc", "mean"),
+            std_auc=("val_auc", "std"),
+        )
+    )
+
+    # Keep a consistent and meaningful order in the table and plots.
+    summary["initialization"] = pd.Categorical(
+        summary["initialization"],
+        categories=initialization_methods,
+        ordered=True,
+    )
+
+    summary = (
+        summary
+        .sort_values("initialization")
+        .reset_index(drop=True)
+    )
+
+    # One explicit x-position per bar. This prevents misalignment between
+    # bars, error bars, and x-axis labels.
+    x_positions = np.arange(len(summary))
+
+    loss_error = summary["std_val_loss"].fillna(0).to_numpy()
+    auc_error = summary["std_auc"].fillna(0).to_numpy()
+
+    colors = {
+        "default": "#7B9ACC",
+        "xavier": "#74B49B",
+        "he": "#F2B84B",
+        "lecun": "#D97B66",
+    }
+
+    bar_colors = [
+        colors[initialization]
+        for initialization in summary["initialization"]
+    ]
+
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=2,
+        figsize=(14, 5),
+    )
+
+    # Cross-validated validation loss.
+    axes[0].bar(
+        x_positions,
+        summary["mean_val_loss"],
+        yerr=loss_error,
+        color=bar_colors,
+        edgecolor="black",
+        width=0.55,
+        capsize=5,
+        error_kw={
+            "ecolor": "black",
+            "elinewidth": 1.5,
+            "capthick": 1.5,
+        },
+    )
+
+    axes[0].set_title("Cross-validated validation loss")
+    axes[0].set_xlabel("Initialization method")
+    axes[0].set_ylabel("Mean validation loss")
+    axes[0].set_xticks(x_positions)
+    axes[0].set_xticklabels(summary["initialization"])
+    axes[0].grid(axis="y", alpha=0.3)
+
+    # Cross-validated ROC-AUC.
+    axes[1].bar(
+        x_positions,
+        summary["mean_auc"],
+        yerr=auc_error,
+        color=bar_colors,
+        edgecolor="black",
+        width=0.55,
+        capsize=5,
+        error_kw={
+            "ecolor": "black",
+            "elinewidth": 1.5,
+            "capthick": 1.5,
+        },
+    )
+
+    axes[1].set_title("Cross-validated ROC-AUC")
+    axes[1].set_xlabel("Initialization method")
+    axes[1].set_ylabel("Mean ROC-AUC")
+    axes[1].set_xticks(x_positions)
+    axes[1].set_xticklabels(summary["initialization"])
+    axes[1].set_ylim(0.0, 1.0)
+    axes[1].grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+    return results, summary
+
+@torch.no_grad()
+def evaluate_on_test_set(
+    model,
+    X_test,
+    y_test,
+    loss_function,
+    batch_size=128,
+):
+    """
+    Evaluate a trained sequence regression model on the held-out test set.
+
+    The loss is calculated once across all test observations so that the
+    F2 score is based on the entire test set rather than individual batches.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        A trained model.
+    X_test : list
+        List of test sequences.
+    y_test : array-like
+        True continuous risk values for the test sequences.
+    loss_function : F2VektetMSELoss
+        Loss function used for evaluation.
+    batch_size : int
+        Number of sequences evaluated per batch.
+
+    Returns
+    -------
+    test_loss : float
+        F2-weighted MSE loss on the complete test set.
+    test_f2 : float
+        F2 score on the complete test set.
+    y_true : np.ndarray
+        True target values.
+    y_pred : np.ndarray
+        Model predictions.
+    """
+    model.eval()
+
+    test_dataset = SequenceDataset(X_test, y_test)
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=training_collate_fn,
+    )
+
+    all_predictions = []
+    all_targets = []
+
+    for X_batch, lengths, y_batch in test_loader:
+        X_batch = X_batch.to(model.device)
+        lengths = lengths.to(model.device)
+        y_batch = y_batch.to(model.device)
+
+        predictions = model(X_batch, lengths)
+
+        all_predictions.append(predictions.reshape(-1))
+        all_targets.append(y_batch.reshape(-1))
+
+    # Combine all batches before calculating F2 and loss.
+    y_pred = torch.cat(all_predictions)
+    y_true = torch.cat(all_targets)
+
+    test_f2 = loss_function.beregn_f2(
+        y_true=y_true,
+        y_pred=y_pred,
+    )
+
+    test_loss = loss_function(
+        y_pred=y_pred,
+        y_true=y_true,
+        f2_score=test_f2,
+    )
+
+    return (
+        test_loss.item(),
+        test_f2.item(),
+        y_true.cpu().numpy(),
+        y_pred.cpu().numpy(),
+    )
