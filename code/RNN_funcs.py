@@ -14,6 +14,12 @@ import random
 
 from sklearn.metrics import roc_auc_score
 
+from sklearn.metrics import (
+    average_precision_score,
+    precision_recall_curve,
+)
+
+
 class F2VektetMSELoss(nn.Module):
     """LLM assisted (UiOGPT)"""
     def __init__(self, threshold=1e-6, beta=2.0, eps=1e-8):
@@ -1906,48 +1912,72 @@ def plot_sequence_length_vs_metrics(
     penalty="l2",
     penalty_strength=1e-5,
     n_bins=5,
-    binning="quantile",
     device=None,
     seed=3155,
 ):
     """
-    Plotter out-of-fold ROC-AUC og BCE-loss gruppert etter sekvenslengde.
+    Plot out-of-fold ROC-AUC and binary cross-entropy loss by sequence length.
 
-    En sekvenslengde er antall CDMer (rader) i ett event før 2-dagers-cutoff.
-    Hver prediksjon er out-of-fold: modellen som predikerer et event har ikke
-    sett det eventet under trening.
+    Sequence length is defined as the number of CDMs (rows) in an event
+    before the two-day cutoff.
+
+    Each event receives an out-of-fold prediction. This means that the model
+    predicting an event has not seen that event during training.
+
+    The range from the shortest to the longest observed sequence is divided
+    into `n_bins` integer intervals. The intervals are made as equally sized
+    as possible. If the integer range cannot be divided evenly, the first
+    intervals receive one additional sequence length.
+
+    Example: if lengths range from 1 to 23 and n_bins=5, the groups are:
+
+    1–5, 6–10, 11–15, 16–19, 20–23
 
     Parameters
     ----------
     data : dict
-        Output fra build_shared_datasets().
-    hidden_layers, nodes_per_layer, rnn_type, dropout :
-        RNN-arkitektur.
-    epochs, batch_size, optimizer, learning_rate :
-        Treningsinnstillinger.
-    class_weight : float eller None
-        Positiv klassevekt. Hvis None estimeres den separat i hver CV-fold.
-    penalty, penalty_strength :
-        Regularisering.
+        Output from build_shared_datasets().
+    hidden_layers : int or list[int]
+        Number of recurrent layers, or a list of hidden units per layer.
+    nodes_per_layer : int
+        Number of hidden units per layer when hidden_layers is an integer.
+    rnn_type : {"rnn", "gru", "lstm"}
+        Type of recurrent neural network.
+    dropout : float
+        Dropout probability.
+    epochs : int
+        Number of training epochs per cross-validation fold.
+    batch_size : int
+        Batch size used during training and prediction.
+    optimizer : str
+        Optimizer name, for example "adam", "adamw", "sgd", or "rmsprop".
+    learning_rate : float
+        Learning rate used by the optimizer.
+    class_weight : float or None
+        Positive class weight. If None, it is estimated separately from the
+        training partition in each cross-validation fold.
+    penalty : {None, "l1", "l2"}
+        Weight regularization type.
+    penalty_strength : float
+        Regularization strength.
     n_bins : int
-        Antall grupper av sekvenslengder.
-    binning : {"quantile", "equal_width"}
-        "quantile" gir omtrent like mange events per gruppe og er normalt best.
-        "equal_width" deler det numeriske området i like brede intervaller.
-    device : str eller None
-        For eksempel "cpu", "cuda" eller None.
+        Number of integer sequence-length intervals.
+    device : str or None
+        Device used for training, for example "cpu", "cuda", or None.
     seed : int
-        Tilfeldighetsfrø.
+        Base random seed.
 
     Returns
     -------
     event_results : pd.DataFrame
-        Én rad per training-event, med OOF-prediksjon og sekvenslengde.
+        One row per training event, including out-of-fold prediction,
+        sequence length, and sequence-length group.
     summary : pd.DataFrame
-        AUC, loss, antall events og antall positive per lengdegruppe.
+        ROC-AUC, binary cross-entropy loss, event counts, and positive-case
+        counts for each sequence-length group.
     """
-    if binning not in {"quantile", "equal_width"}:
-        raise ValueError("binning må være 'quantile' eller 'equal_width'.")
+    if not isinstance(n_bins, int) or n_bins < 1:
+        raise ValueError("n_bins must be a positive integer.")
 
     X_train = data["sequences"]["train"]
     y_train = np.asarray(data["y_class"]["train"])
@@ -1956,23 +1986,52 @@ def plot_sequence_length_vs_metrics(
 
     n_events = len(X_train)
 
-    # Hver event fylles inn én gang, når den er validation-data i sin fold.
-    oof_probabilities = np.full(n_events, np.nan, dtype=float)
-    fold_numbers = np.full(n_events, -1, dtype=int)
+    # Each event receives one prediction when it is validation data.
+    oof_probabilities = np.full(
+        n_events,
+        np.nan,
+        dtype=float,
+    )
 
-    # Sekvenslengde = antall CDMs/rader i eventet.
+    fold_numbers = np.full(
+        n_events,
+        -1,
+        dtype=int,
+    )
+
+    # Sequence length equals the number of CDMs/rows in each event.
     sequence_lengths = np.asarray(
         [len(sequence) for sequence in X_train],
         dtype=int,
     )
 
-    for fold_number, (fit_idx, val_idx) in enumerate(cv_folds, start=1):
-        print(f"Trener CV-fold {fold_number}/{len(cv_folds)}")
+    minimum_length = int(sequence_lengths.min())
+    maximum_length = int(sequence_lengths.max())
+
+    # Include both endpoints. For example, 1 through 23 contains 23 lengths.
+    number_of_possible_lengths = (
+        maximum_length - minimum_length + 1
+    )
+
+    if n_bins > number_of_possible_lengths:
+        raise ValueError(
+            "n_bins cannot be larger than the number of possible "
+            "integer sequence lengths. "
+            f"Observed sequence-length range is "
+            f"{minimum_length}–{maximum_length}."
+        )
+
+    for fold_number, (fit_idx, val_idx) in enumerate(
+        cv_folds,
+        start=1,
+    ):
+        print(f"Training CV fold {fold_number}/{len(cv_folds)}")
 
         X_fit = [X_train[i] for i in fit_idx]
         X_val = [X_train[i] for i in val_idx]
 
         y_fit = y_train[fit_idx]
+        y_val = y_train[val_idx]
 
         if class_weight is None:
             n_positive = np.sum(y_fit == 1)
@@ -2001,7 +2060,7 @@ def plot_sequence_length_vs_metrics(
             X_train=X_fit,
             y_train=y_fit,
             X_val=X_val,
-            y_val=y_train[val_idx],
+            y_val=y_val,
             epochs=epochs,
             batch_size=batch_size,
             optimizer=optimizer,
@@ -2016,12 +2075,13 @@ def plot_sequence_length_vs_metrics(
             X_val,
             batch_size=batch_size,
         )
+
         fold_numbers[val_idx] = fold_number
 
     if np.isnan(oof_probabilities).any():
         raise RuntimeError(
-            "Noen events mangler out-of-fold-prediksjon. "
-            "Sjekk at CV-foldene dekker alle training-events."
+            "Some events are missing out-of-fold predictions. "
+            "Check that the CV folds cover all training events."
         )
 
     event_results = pd.DataFrame(
@@ -2033,20 +2093,54 @@ def plot_sequence_length_vs_metrics(
         }
     )
 
-    # Gruppér sekvenslengdene.
-    if binning == "quantile":
-        # duplicates="drop" håndterer dersom mange events har samme lengde.
-        event_results["length_bin"] = pd.qcut(
-            event_results["sequence_length"],
-            q=n_bins,
-            duplicates="drop",
-        )
-    else:
-        event_results["length_bin"] = pd.cut(
-            event_results["sequence_length"],
-            bins=n_bins,
-            include_lowest=True,
-        )
+    # Divide possible integer lengths as evenly as possible.
+    #
+    # Example:
+    # 23 possible lengths and 5 bins:
+    # base_width = 4, remainder = 3
+    # bin widths = [5, 5, 5, 4, 4]
+    base_width, remainder = divmod(
+        number_of_possible_lengths,
+        n_bins,
+    )
+
+    bin_widths = [
+        base_width + 1 if bin_index < remainder else base_width
+        for bin_index in range(n_bins)
+    ]
+
+    bin_starts = []
+    bin_ends = []
+
+    current_start = minimum_length
+
+    for width in bin_widths:
+        current_end = current_start + width - 1
+
+        bin_starts.append(current_start)
+        bin_ends.append(current_end)
+
+        current_start = current_end + 1
+
+    bin_labels = [
+        f"{start}–{end}"
+        for start, end in zip(bin_starts, bin_ends)
+    ]
+
+    # Half-integer edges assign integer sequence lengths to inclusive bins.
+    # Example for 1–5 and 6–10: 0.5, 5.5, 10.5.
+    bin_edges = [minimum_length - 0.5] + [
+        end + 0.5
+        for end in bin_ends
+    ]
+
+    event_results["length_bin"] = pd.cut(
+        event_results["sequence_length"],
+        bins=bin_edges,
+        labels=bin_labels,
+        include_lowest=True,
+        ordered=True,
+    )
 
     rows = []
 
@@ -2057,13 +2151,15 @@ def plot_sequence_length_vs_metrics(
         y_group = group["y_true"].to_numpy()
         p_group = group["y_probability"].to_numpy()
 
-        # AUC er ikke definert dersom gruppen bare har én klasse.
+        # ROC-AUC requires at least one observation from each class.
         if len(np.unique(y_group)) < 2:
             auc = np.nan
         else:
-            auc = roc_auc_score(y_group, p_group)
+            auc = roc_auc_score(
+                y_group,
+                p_group,
+            )
 
-        # Unweighted BCE / log loss. clip beskytter mot log(0).
         probabilities_clipped = np.clip(
             p_group,
             1e-7,
@@ -2079,11 +2175,17 @@ def plot_sequence_length_vs_metrics(
         rows.append(
             {
                 "length_bin": str(length_bin),
-                "mean_sequence_length": group["sequence_length"].mean(),
-                "min_sequence_length": group["sequence_length"].min(),
-                "max_sequence_length": group["sequence_length"].max(),
+                "mean_sequence_length": (
+                    group["sequence_length"].mean()
+                ),
+                "min_sequence_length": (
+                    group["sequence_length"].min()
+                ),
+                "max_sequence_length": (
+                    group["sequence_length"].max()
+                ),
                 "n_events": len(group),
-                "n_positive": int(y_group.sum()),
+                "n_positive_cases": int(y_group.sum()),
                 "auc": auc,
                 "bce_loss": bce_loss,
             }
@@ -2091,12 +2193,11 @@ def plot_sequence_length_vs_metrics(
 
     summary = pd.DataFrame(rows)
 
-    # Sorterer intervallene etter faktisk gjennomsnittlig sekvenslengde.
     summary = summary.sort_values(
-        "mean_sequence_length",
+        "min_sequence_length",
     ).reset_index(drop=True)
 
-    x = np.arange(len(summary))
+    x_positions = np.arange(len(summary))
 
     fig, axes = plt.subplots(
         nrows=1,
@@ -2104,18 +2205,19 @@ def plot_sequence_length_vs_metrics(
         figsize=(15, 5),
     )
 
-    # ROC-AUC
+    # ROC-AUC plot.
     axes[0].bar(
-        x,
+        x_positions,
         summary["auc"],
         color="steelblue",
         edgecolor="black",
     )
+
     axes[0].set_ylim(0.0, 1.0)
-    axes[0].set_title("Out-of-fold ROC-AUC etter sekvenslengde")
-    axes[0].set_xlabel("Sekvenslengdegruppe, antall CDMs")
+    axes[0].set_title("Out-of-fold ROC-AUC by sequence length")
+    axes[0].set_xlabel("Sequence length group (number of CDMs)")
     axes[0].set_ylabel("ROC-AUC")
-    axes[0].set_xticks(x)
+    axes[0].set_xticks(x_positions)
     axes[0].set_xticklabels(
         summary["length_bin"],
         rotation=30,
@@ -2123,17 +2225,20 @@ def plot_sequence_length_vs_metrics(
     )
     axes[0].grid(axis="y", alpha=0.3)
 
-    # Binary cross-entropy
+    # Binary cross-entropy plot.
     axes[1].bar(
-        x,
+        x_positions,
         summary["bce_loss"],
         color="indianred",
         edgecolor="black",
     )
-    axes[1].set_title("Out-of-fold BCE-loss etter sekvenslengde")
-    axes[1].set_xlabel("Sekvenslengdegruppe, antall CDMs")
+
+    axes[1].set_title(
+        "Out-of-fold binary cross-entropy loss by sequence length"
+    )
+    axes[1].set_xlabel("Sequence length group (number of CDMs)")
     axes[1].set_ylabel("Binary cross-entropy loss")
-    axes[1].set_xticks(x)
+    axes[1].set_xticks(x_positions)
     axes[1].set_xticklabels(
         summary["length_bin"],
         rotation=30,
@@ -2141,21 +2246,22 @@ def plot_sequence_length_vs_metrics(
     )
     axes[1].grid(axis="y", alpha=0.3)
 
-    # Vis antall events og antall positive over hver søyle.
+    # Add event counts and positive-case counts above the bars.
     for axis, values in zip(
         axes,
         [summary["auc"], summary["bce_loss"]],
     ):
-        for i, value in enumerate(values):
+        for index, value in enumerate(values):
             if not np.isnan(value):
                 axis.text(
-                    i,
+                    index,
                     value,
-                    f"n={summary.loc[i, 'n_events']}\n"
-                    f"pos={summary.loc[i, 'n_positive']}",
+                    f"Events: {summary.loc[index, 'n_events']}\n"
+                    f"Positive cases: "
+                    f"{summary.loc[index, 'n_positive_cases']}",
                     ha="center",
                     va="bottom",
-                    fontsize=9,
+                    fontsize=8,
                 )
 
     plt.tight_layout()
@@ -2552,3 +2658,111 @@ def evaluate_on_test_set(
         y_true.cpu().numpy(),
         y_pred.cpu().numpy(),
     )
+
+
+
+
+def plot_precision_recall_curve(
+    model,
+    X,
+    y_true,
+    batch_size=128,
+    title="Precision–Recall Curve",
+):
+    """
+    Plot a precision-recall curve for a trained binary classification model.
+
+    The model must implement a `predict_proba()` method that returns the
+    predicted probability of the positive class for each input sequence.
+
+    Parameters
+    ----------
+    model : RNNClassifier
+        A trained binary classification model with a `predict_proba` method.
+    X : list
+        Input sequences to evaluate, for example `data["sequences"]["test"]`.
+    y_true : array-like
+        True binary labels. Values must be 0 or 1.
+    batch_size : int, default=128
+        Prediction batch size.
+    title : str, default="Precision–Recall Curve"
+        Title shown above the plot.
+
+    Returns
+    -------
+    precision : np.ndarray
+        Precision values for different probability thresholds.
+    recall : np.ndarray
+        Recall values for different probability thresholds.
+    thresholds : np.ndarray
+        Probability thresholds. This array has one fewer element than
+        precision and recall.
+    average_precision : float
+        Average precision score.
+    """
+    y_true = np.asarray(y_true).reshape(-1)
+
+    if len(X) != len(y_true):
+        raise ValueError(
+            "X and y_true must contain the same number of observations."
+        )
+
+    if not np.all(np.isin(y_true, [0, 1])):
+        raise ValueError("y_true must contain only binary values: 0 and 1.")
+
+    if len(np.unique(y_true)) < 2:
+        raise ValueError(
+            "A precision-recall curve requires both classes in y_true."
+        )
+
+    y_probability = model.predict_proba(
+        X,
+        batch_size=batch_size,
+    )
+
+    precision, recall, thresholds = precision_recall_curve(
+        y_true,
+        y_probability,
+    )
+
+    average_precision = average_precision_score(
+        y_true,
+        y_probability,
+    )
+
+    positive_prevalence = y_true.mean()
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    ax.plot(
+        recall,
+        precision,
+        color="steelblue",
+        linewidth=2,
+        label=f"Model (average precision = {average_precision:.3f})",
+    )
+
+    # Baseline precision equals the proportion of positive cases.
+    ax.axhline(
+        positive_prevalence,
+        color="gray",
+        linestyle="--",
+        linewidth=1.5,
+        label=(
+            "No-skill baseline "
+            f"(positive prevalence = {positive_prevalence:.3f})"
+        ),
+    )
+
+    ax.set_title(title)
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(alpha=0.3)
+    ax.legend(loc="best")
+
+    plt.tight_layout()
+    plt.show()
+
+    return precision, recall, thresholds, average_precision
