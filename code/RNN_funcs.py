@@ -9,8 +9,10 @@ import pandas as pd
 from read_data import build_shared_datasets
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, roc_curve, roc_auc_score, log_loss
+import random
 
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import roc_auc_score
 
 class F2VektetMSELoss(nn.Module):
     """LLM assisted (UiOGPT)"""
@@ -944,3 +946,1100 @@ def plot_confusion_matrix(
 
     return cm, y_prob, y_pred
 
+
+def plot_roc_curve(
+    model,
+    X_test,
+    y_test,
+    batch_size=128,
+    title="ROC-kurve",
+):
+    """
+    Plotter ROC-kurve for en trent RNNClassifier.
+
+    Parameters
+    ----------
+    model : RNNClassifier
+        Trent modell med predict_proba().
+    X_test : list
+        Liste av testsekvenser.
+    y_test : array-like
+        Sanne binære labels.
+    batch_size : int
+        Batch-størrelse ved prediksjon.
+    title : str
+        Tittel på plottet.
+
+    Returns
+    -------
+    auc : float
+        Arealet under ROC-kurven.
+    y_prob : np.ndarray
+        Predikerte sannsynligheter for klasse 1.
+    """
+    y_test = np.asarray(y_test).astype(int)
+
+    # Sannsynlighet for klasse 1 / høy risiko.
+    y_prob = model.predict_proba(
+        X_test,
+        batch_size=batch_size,
+    )
+
+    fpr, tpr, thresholds = roc_curve(
+        y_test,
+        y_prob,
+    )
+
+    auc = roc_auc_score(
+        y_test,
+        y_prob,
+    )
+
+    plt.figure(figsize=(6, 5))
+
+    plt.plot(
+        fpr,
+        tpr,
+        linewidth=2,
+        label=f"RNN (AUC = {auc:.3f})",
+    )
+
+    plt.plot(
+        [0, 1],
+        [0, 1],
+        linestyle="--",
+        color="gray",
+        label="Tilfeldig klassifikator",
+    )
+
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate / Recall")
+    plt.title(title)
+    plt.legend(loc="lower right")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    return auc, y_prob, fpr, tpr, thresholds
+
+import random
+
+import numpy as np
+import pandas as pd
+import torch
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.metrics import roc_auc_score
+
+
+def set_seed(seed):
+    """Setter tilfeldighetsfrø for mer reproduserbare RNN-forsøk."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def plot_rnn_architecture_heatmaps(
+    data,
+    hidden_layer_values=(1, 2, 3),
+    nodes_per_layer_values=(25, 50, 75),
+    rnn_type="gru",
+    dropout=0.2,
+    epochs=20,
+    batch_size=32,
+    optimizer="adam",
+    learning_rate=1e-4,
+    class_weight=None,
+    penalty=None,
+    penalty_strength=0.0,
+    device=None,
+    seed=3155,
+):
+    """
+    Kryssvaliderer RNN-arkitekturer og plotter heatmaps for loss og ROC-AUC.
+
+    Parameters
+    ----------
+    data : dict
+        Output fra build_shared_datasets().
+    hidden_layer_values : iterable
+        Antall hidden layers, f.eks. [1, 2, 3].
+    nodes_per_layer_values : iterable
+        Antall noder per hidden layer, f.eks. [25, 50, 75].
+    rnn_type : str
+        "gru", "lstm" eller "rnn".
+    dropout : float
+        Dropout-sannsynlighet.
+    epochs : int
+        Antall treningsepoker per CV-fold.
+    batch_size : int
+        Batch-størrelse.
+    optimizer : str
+        For eksempel "adam", "adamw" eller "sgd".
+    learning_rate : float
+        Learning rate.
+    class_weight : float eller None
+        Positiv klassevekt. Hvis None, beregnes vekten separat i hver fold
+        som antall negative delt på antall positive trenings-events.
+    penalty : None, "l1" eller "l2"
+        Regulariseringstype.
+    penalty_strength : float
+        Styrken på regulariseringen.
+    device : str eller None
+        F.eks. "cpu", "cuda" eller None.
+    seed : int
+        Tilfeldighetsfrø.
+
+    Returns
+    -------
+    results : pd.DataFrame
+        Resultater for hver arkitektur og CV-fold.
+    loss_heatmap : pd.DataFrame
+        Gjennomsnittlig validation loss.
+    auc_heatmap : pd.DataFrame
+        Gjennomsnittlig validation ROC-AUC.
+    """
+    X_train = data["sequences"]["train"]
+    y_train = np.asarray(data["y_class"]["train"])
+    cv_folds = data["cv_folds"]
+    input_size = len(data["sequence_columns"])
+
+    results_rows = []
+
+    for n_layers in hidden_layer_values:
+        for n_nodes in nodes_per_layer_values:
+            print(
+                f"Tester: {n_layers} hidden layer(s), "
+                f"{n_nodes} nodes per layer"
+            )
+
+            for fold_number, (fit_idx, val_idx) in enumerate(
+                cv_folds,
+                start=1,
+            ):
+                # Hent sekvensene til denne folden.
+                X_fit = [X_train[i] for i in fit_idx]
+                X_val = [X_train[i] for i in val_idx]
+
+                y_fit = y_train[fit_idx]
+                y_val = y_train[val_idx]
+
+                # Beregn positiv klassevekt fra kun treningsdelen av folden.
+                if class_weight is None:
+                    n_positive = np.sum(y_fit == 1)
+                    n_negative = np.sum(y_fit == 0)
+
+                    if n_positive == 0:
+                        current_class_weight = None
+                    else:
+                        current_class_weight = n_negative / n_positive
+                else:
+                    current_class_weight = class_weight
+
+                # Ulikt seed per fold/arkitektur, men reproduserbart.
+                current_seed = (
+                    seed
+                    + 1000 * n_layers
+                    + 100 * n_nodes
+                    + fold_number
+                )
+                set_seed(current_seed)
+
+                # Viktig: ny modell for hver fold.
+                model = RNNClassifier(
+                    input_size=input_size,
+                    hidden_layers=n_layers,
+                    nodes_per_layer=n_nodes,
+                    rnn_type=rnn_type,
+                    dropout=dropout,
+                    device=device,
+                )
+
+                model.fit(
+                    X_train=X_fit,
+                    y_train=y_fit,
+                    X_val=X_val,
+                    y_val=y_val,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    optimizer=optimizer,
+                    learning_rate=learning_rate,
+                    class_weight=current_class_weight,
+                    penalty=penalty,
+                    penalty_strength=penalty_strength,
+                    verbose=False,
+                )
+
+                # Loss etter siste training epoch.
+                final_val_loss = model.history["val_loss"][-1]
+
+                # ROC-AUC på validation-delen etter siste training epoch.
+                y_val_prob = model.predict_proba(
+                    X_val,
+                    batch_size=batch_size,
+                )
+                val_auc = roc_auc_score(y_val, y_val_prob)
+
+                results_rows.append(
+                    {
+                        "hidden_layers": n_layers,
+                        "nodes_per_layer": n_nodes,
+                        "fold": fold_number,
+                        "final_val_loss": final_val_loss,
+                        "val_auc": val_auc,
+                    }
+                )
+
+                print(
+                    f"  Fold {fold_number}/{len(cv_folds)} | "
+                    f"loss: {final_val_loss:.4f} | "
+                    f"AUC: {val_auc:.4f}"
+                )
+
+    results = pd.DataFrame(results_rows)
+
+    # Gjennomsnitt over CV-foldene.
+    loss_heatmap = results.pivot_table(
+        index="hidden_layers",
+        columns="nodes_per_layer",
+        values="final_val_loss",
+        aggfunc="mean",
+    ).reindex(
+        index=hidden_layer_values,
+        columns=nodes_per_layer_values,
+    )
+
+    auc_heatmap = results.pivot_table(
+        index="hidden_layers",
+        columns="nodes_per_layer",
+        values="val_auc",
+        aggfunc="mean",
+    ).reindex(
+        index=hidden_layer_values,
+        columns=nodes_per_layer_values,
+    )
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(14, 5),
+    )
+
+    sns.heatmap(
+        loss_heatmap,
+        annot=True,
+        fmt=".3f",
+        cmap="YlOrRd",
+        linewidths=0.5,
+        cbar_kws={"label": "Gjennomsnittlig validation loss"},
+        ax=axes[0],
+    )
+    axes[0].set_title("CV validation loss")
+    axes[0].set_xlabel("Nodes per hidden layer")
+    axes[0].set_ylabel("Antall hidden layers")
+
+    sns.heatmap(
+        auc_heatmap,
+        annot=True,
+        fmt=".3f",
+        cmap="YlGnBu",
+        vmin=0.5,
+        vmax=1.0,
+        linewidths=0.5,
+        cbar_kws={"label": "Gjennomsnittlig validation ROC-AUC"},
+        ax=axes[1],
+    )
+    axes[1].set_title("CV ROC-AUC")
+    axes[1].set_xlabel("Nodes per hidden layer")
+    axes[1].set_ylabel("Antall hidden layers")
+
+    plt.tight_layout()
+    plt.show()
+
+    return results, loss_heatmap, auc_heatmap
+
+
+def compare_rnn_optimizers_cv(
+    data,
+    hidden_layers=1,
+    nodes_per_layer=25,
+    rnn_type="gru",
+    dropout=0.2,
+    epochs=10,
+    batch_size=32,
+    learning_rates=None,
+    class_weight=10,
+    penalty="l2",
+    penalty_strength=1e-5,
+    device=None,
+    seed=3155,
+):
+    """
+    Sammenligner Adam, RMSprop og plain SGD med kryssvalidering.
+
+    Parameters
+    ----------
+    data : dict
+        Output fra build_shared_datasets().
+    hidden_layers : int eller list[int]
+        Arkitekturargument til RNNClassifier.
+    nodes_per_layer : int
+        Noder per hidden layer dersom hidden_layers er et heltall.
+    rnn_type : str
+        "gru", "lstm" eller "rnn".
+    dropout : float
+        Dropout-rate.
+    epochs : int
+        Antall treningsepoker per fold.
+    batch_size : int
+        Batch-størrelse.
+    learning_rates : dict eller None
+        Learning rate per optimizer. Hvis None brukes anbefalte startverdier.
+    class_weight : float eller None
+        Positiv klassevekt. Hvis None beregnes den separat fra treningsdelen
+        av hver fold.
+    penalty : None, "l1" eller "l2"
+        Type regularisering.
+    penalty_strength : float
+        Regulariseringsstyrke.
+    device : str eller None
+        Eksempel: "cpu", "cuda" eller None.
+    seed : int
+        Tilfeldighetsfrø.
+
+    Returns
+    -------
+    results : pd.DataFrame
+        Ett resultat per optimizer og CV-fold.
+    summary : pd.DataFrame
+        Gjennomsnitt og standardavvik for hver optimizer.
+    """
+    if learning_rates is None:
+        # SGD trenger ofte en større learning rate enn Adam/RMSprop.
+        learning_rates = {
+            "adam": 1e-4,
+            "rmsprop": 1e-4,
+            "sgd": 1e-2,
+        }
+
+    optimizers = ["adam", "rmsprop", "sgd"]
+
+    missing = set(optimizers) - set(learning_rates)
+    if missing:
+        raise ValueError(
+            f"learning_rates mangler verdier for: {sorted(missing)}"
+        )
+
+    X_train = data["sequences"]["train"]
+    y_train = np.asarray(data["y_class"]["train"])
+    cv_folds = data["cv_folds"]
+    input_size = len(data["sequence_columns"])
+
+    results_rows = []
+
+    for optimizer_number, optimizer_name in enumerate(optimizers):
+        learning_rate = learning_rates[optimizer_name]
+
+        print(
+            f"\n{'=' * 60}\n"
+            f"Tester optimizer: {optimizer_name.upper()} | "
+            f"learning rate: {learning_rate}\n"
+            f"{'=' * 60}"
+        )
+
+        for fold_number, (fit_idx, val_idx) in enumerate(cv_folds, start=1):
+            X_fit = [X_train[i] for i in fit_idx]
+            X_val = [X_train[i] for i in val_idx]
+
+            y_fit = y_train[fit_idx]
+            y_val = y_train[val_idx]
+
+            # Hvis vekten ikke er oppgitt, estimeres den fra kun denne
+            # foldens treningsdata.
+            if class_weight is None:
+                n_positive = np.sum(y_fit == 1)
+                n_negative = np.sum(y_fit == 0)
+
+                current_class_weight = (
+                    n_negative / n_positive
+                    if n_positive > 0
+                    else None
+                )
+            else:
+                current_class_weight = class_weight
+
+            current_seed = seed + optimizer_number * 100 + fold_number
+            set_seed(current_seed)
+
+            model = RNNClassifier(
+                input_size=input_size,
+                hidden_layers=hidden_layers,
+                nodes_per_layer=nodes_per_layer,
+                rnn_type=rnn_type,
+                dropout=dropout,
+                device=device,
+            )
+
+            # Plain SGD: ingen momentum, ingen weight decay.
+            # Adam og RMSprop bruker også standardinnstillinger.
+            model.fit(
+                X_train=X_fit,
+                y_train=y_fit,
+                X_val=X_val,
+                y_val=y_val,
+                epochs=epochs,
+                batch_size=batch_size,
+                optimizer=optimizer_name,
+                learning_rate=learning_rate,
+                optimizer_kwargs={},
+                class_weight=current_class_weight,
+                penalty=penalty,
+                penalty_strength=penalty_strength,
+                verbose=False,
+            )
+
+            final_val_loss = model.history["val_loss"][-1]
+
+            y_val_prob = model.predict_proba(
+                X_val,
+                batch_size=batch_size,
+            )
+
+            val_auc = roc_auc_score(y_val, y_val_prob)
+
+            results_rows.append(
+                {
+                    "optimizer": optimizer_name,
+                    "learning_rate": learning_rate,
+                    "fold": fold_number,
+                    "final_val_loss": final_val_loss,
+                    "val_auc": val_auc,
+                }
+            )
+
+            print(
+                f"Fold {fold_number}/{len(cv_folds)} | "
+                f"loss: {final_val_loss:.4f} | "
+                f"AUC: {val_auc:.4f}"
+            )
+
+    results = pd.DataFrame(results_rows)
+
+    summary = (
+        results
+        .groupby(["optimizer", "learning_rate"], as_index=False)
+        .agg(
+            mean_val_loss=("final_val_loss", "mean"),
+            std_val_loss=("final_val_loss", "std"),
+            mean_auc=("val_auc", "mean"),
+            std_auc=("val_auc", "std"),
+        )
+    )
+
+    # Få en fast og pen rekkefølge i tabeller og plott.
+    optimizer_order = ["adam", "rmsprop", "sgd"]
+
+    summary["optimizer"] = pd.Categorical(
+        summary["optimizer"],
+        categories=optimizer_order,
+        ordered=True,
+    )
+
+    summary = summary.sort_values("optimizer").reset_index(drop=True)
+
+    # Plot gjennomsnitt med standardavvik mellom foldene.
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=2,
+        figsize=(13, 5),
+    )
+
+    sns.barplot(
+        data=summary,
+        x="optimizer",
+        y="mean_val_loss",
+        hue="optimizer",
+        palette="YlOrRd",
+        legend=False,
+        ax=axes[0],
+    )
+
+    axes[0].errorbar(
+        x=np.arange(len(summary)),
+        y=summary["mean_val_loss"],
+        yerr=summary["std_val_loss"],
+        fmt="none",
+        color="black",
+        capsize=5,
+    )
+
+    axes[0].set_title("Kryss-validert validation loss")
+    axes[0].set_xlabel("Optimizer")
+    axes[0].set_ylabel("Gjennomsnittlig validation loss")
+
+    sns.barplot(
+        data=summary,
+        x="optimizer",
+        y="mean_auc",
+        hue="optimizer",
+        palette="YlGnBu",
+        legend=False,
+        ax=axes[1],
+    )
+
+    axes[1].errorbar(
+        x=np.arange(len(summary)),
+        y=summary["mean_auc"],
+        yerr=summary["std_auc"],
+        fmt="none",
+        color="black",
+        capsize=5,
+    )
+
+    axes[1].set_title("Kryss-validert ROC-AUC")
+    axes[1].set_xlabel("Optimizer")
+    axes[1].set_ylabel("Gjennomsnittlig ROC-AUC")
+    axes[1].set_ylim(0.0, 1.0)
+
+    plt.tight_layout()
+    plt.show()
+
+    return results, summary
+
+
+def plot_learning_rate_l2_heatmaps(
+    data,
+    learning_rates=(1e-4, 1e-3, 1e-2),
+    penalty_strengths=(1e-5, 1e-4, 1e-3),
+    hidden_layers=1,
+    nodes_per_layer=25,
+    rnn_type="gru",
+    dropout=0.2,
+    epochs=10,
+    batch_size=32,
+    optimizer="adam",
+    class_weight=10,
+    device=None,
+    seed=3155,
+):
+    """
+    Kryssvaliderer kombinasjoner av learning rate og L2-regularisering.
+
+    Heatmaps:
+        - rader: L2 penalty strength
+        - kolonner: learning rate
+        - venstre: gjennomsnittlig validation loss
+        - høyre: gjennomsnittlig validation ROC-AUC
+
+    Parameters
+    ----------
+    data : dict
+        Output fra build_shared_datasets().
+    learning_rates : iterable
+        Learning rates, f.eks. [1e-4, 1e-3, 1e-2].
+    penalty_strengths : iterable
+        L2-verdier, f.eks. [1e-5, 1e-4, 1e-3].
+    hidden_layers : int eller list[int]
+        Argument som sendes til RNNClassifier.
+    nodes_per_layer : int
+        Noder per hidden layer dersom hidden_layers er et heltall.
+    rnn_type : str
+        "gru", "lstm" eller "rnn".
+    dropout : float
+        Dropout-sannsynlighet.
+    epochs : int
+        Antall treningsepoker per fold.
+    batch_size : int
+        Batch-størrelse.
+    optimizer : str
+        "adam", "adamw", "rmsprop" eller "sgd".
+    class_weight : float eller None
+        Positiv klassevekt. Ved None beregnes vekten per fold som
+        antall negative / antall positive i foldens treningsdata.
+    device : str eller None
+        For eksempel "cpu", "cuda" eller None.
+    seed : int
+        Tilfeldighetsfrø.
+
+    Returns
+    -------
+    results : pd.DataFrame
+        Resultater for hver learning rate, penalty og CV-fold.
+    loss_heatmap : pd.DataFrame
+        Gjennomsnittlig validation loss.
+    auc_heatmap : pd.DataFrame
+        Gjennomsnittlig validation ROC-AUC.
+    """
+    X_train = data["sequences"]["train"]
+    y_train = np.asarray(data["y_class"]["train"])
+    cv_folds = data["cv_folds"]
+    input_size = len(data["sequence_columns"])
+
+    learning_rates = list(learning_rates)
+    penalty_strengths = list(penalty_strengths)
+
+    results_rows = []
+
+    for penalty_index, penalty_strength in enumerate(penalty_strengths):
+        for lr_index, learning_rate in enumerate(learning_rates):
+            print(
+                f"\nTester learning_rate={learning_rate:.0e}, "
+                f"L2 penalty={penalty_strength:.0e}"
+            )
+
+            for fold_number, (fit_idx, val_idx) in enumerate(
+                cv_folds,
+                start=1,
+            ):
+                X_fit = [X_train[i] for i in fit_idx]
+                X_val = [X_train[i] for i in val_idx]
+
+                y_fit = y_train[fit_idx]
+                y_val = y_train[val_idx]
+
+                if class_weight is None:
+                    n_positive = np.sum(y_fit == 1)
+                    n_negative = np.sum(y_fit == 0)
+
+                    current_class_weight = (
+                        n_negative / n_positive
+                        if n_positive > 0
+                        else None
+                    )
+                else:
+                    current_class_weight = class_weight
+
+                # Samme seed-logikk for reproduserbare, men ulike, forsøk.
+                current_seed = (
+                    seed
+                    + 10_000 * penalty_index
+                    + 1_000 * lr_index
+                    + fold_number
+                )
+                set_seed(current_seed)
+
+                # Ny modell per fold: aldri gjenbruk vektene fra en annen fold.
+                model = RNNClassifier(
+                    input_size=input_size,
+                    hidden_layers=hidden_layers,
+                    nodes_per_layer=nodes_per_layer,
+                    rnn_type=rnn_type,
+                    dropout=dropout,
+                    device=device,
+                )
+
+                model.fit(
+                    X_train=X_fit,
+                    y_train=y_fit,
+                    X_val=X_val,
+                    y_val=y_val,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    optimizer=optimizer,
+                    learning_rate=learning_rate,
+                    class_weight=current_class_weight,
+                    penalty="l2",
+                    penalty_strength=penalty_strength,
+                    verbose=False,
+                )
+
+                # Klassen har ikke early stopping. Derfor brukes tapet fra
+                # den siste epoken.
+                final_val_loss = model.history["val_loss"][-1]
+
+                y_val_prob = model.predict_proba(
+                    X_val,
+                    batch_size=batch_size,
+                )
+                val_auc = roc_auc_score(y_val, y_val_prob)
+
+                results_rows.append(
+                    {
+                        "learning_rate": learning_rate,
+                        "penalty_strength": penalty_strength,
+                        "fold": fold_number,
+                        "final_val_loss": final_val_loss,
+                        "val_auc": val_auc,
+                    }
+                )
+
+                print(
+                    f"  Fold {fold_number}/{len(cv_folds)} | "
+                    f"loss: {final_val_loss:.4f} | "
+                    f"AUC: {val_auc:.4f}"
+                )
+
+    results = pd.DataFrame(results_rows)
+
+    loss_heatmap = (
+        results
+        .pivot_table(
+            index="penalty_strength",
+            columns="learning_rate",
+            values="final_val_loss",
+            aggfunc="mean",
+        )
+        .reindex(
+            index=penalty_strengths,
+            columns=learning_rates,
+        )
+    )
+
+    auc_heatmap = (
+        results
+        .pivot_table(
+            index="penalty_strength",
+            columns="learning_rate",
+            values="val_auc",
+            aggfunc="mean",
+        )
+        .reindex(
+            index=penalty_strengths,
+            columns=learning_rates,
+        )
+    )
+
+    # Mer lesbare etiketter enn 0.0001 og 0.00001.
+    lr_labels = [f"{lr:.0e}" for lr in learning_rates]
+    penalty_labels = [f"{penalty:.0e}" for penalty in penalty_strengths]
+
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=2,
+        figsize=(14, 5),
+    )
+
+    sns.heatmap(
+        loss_heatmap,
+        annot=True,
+        fmt=".3f",
+        cmap="YlOrRd",
+        linewidths=0.5,
+        xticklabels=lr_labels,
+        yticklabels=penalty_labels,
+        cbar_kws={"label": "Gjennomsnittlig validation loss"},
+        ax=axes[0],
+    )
+
+    axes[0].set_title("CV validation loss")
+    axes[0].set_xlabel("Learning rate")
+    axes[0].set_ylabel("L2 penalty strength")
+
+    sns.heatmap(
+        auc_heatmap,
+        annot=True,
+        fmt=".3f",
+        cmap="YlGnBu",
+        vmin=0.5,
+        vmax=1.0,
+        linewidths=0.5,
+        xticklabels=lr_labels,
+        yticklabels=penalty_labels,
+        cbar_kws={"label": "Gjennomsnittlig validation ROC-AUC"},
+        ax=axes[1],
+    )
+
+    axes[1].set_title("CV ROC-AUC")
+    axes[1].set_xlabel("Learning rate")
+    axes[1].set_ylabel("L2 penalty strength")
+
+    plt.tight_layout()
+    plt.show()
+
+    return results, loss_heatmap, auc_heatmap
+
+
+import random
+
+import numpy as np
+import pandas as pd
+import torch
+import matplotlib.pyplot as plt
+
+from sklearn.metrics import roc_auc_score, log_loss
+
+
+def set_seed(seed):
+    """Gjør PyTorch/Numpy-resultater mer reproduserbare."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def plot_sequence_length_vs_metrics(
+    data,
+    hidden_layers=1,
+    nodes_per_layer=25,
+    rnn_type="gru",
+    dropout=0.2,
+    epochs=10,
+    batch_size=32,
+    optimizer="adam",
+    learning_rate=1e-4,
+    class_weight=10,
+    penalty="l2",
+    penalty_strength=1e-5,
+    n_bins=5,
+    binning="quantile",
+    device=None,
+    seed=3155,
+):
+    """
+    Plotter out-of-fold ROC-AUC og BCE-loss gruppert etter sekvenslengde.
+
+    En sekvenslengde er antall CDMer (rader) i ett event før 2-dagers-cutoff.
+    Hver prediksjon er out-of-fold: modellen som predikerer et event har ikke
+    sett det eventet under trening.
+
+    Parameters
+    ----------
+    data : dict
+        Output fra build_shared_datasets().
+    hidden_layers, nodes_per_layer, rnn_type, dropout :
+        RNN-arkitektur.
+    epochs, batch_size, optimizer, learning_rate :
+        Treningsinnstillinger.
+    class_weight : float eller None
+        Positiv klassevekt. Hvis None estimeres den separat i hver CV-fold.
+    penalty, penalty_strength :
+        Regularisering.
+    n_bins : int
+        Antall grupper av sekvenslengder.
+    binning : {"quantile", "equal_width"}
+        "quantile" gir omtrent like mange events per gruppe og er normalt best.
+        "equal_width" deler det numeriske området i like brede intervaller.
+    device : str eller None
+        For eksempel "cpu", "cuda" eller None.
+    seed : int
+        Tilfeldighetsfrø.
+
+    Returns
+    -------
+    event_results : pd.DataFrame
+        Én rad per training-event, med OOF-prediksjon og sekvenslengde.
+    summary : pd.DataFrame
+        AUC, loss, antall events og antall positive per lengdegruppe.
+    """
+    if binning not in {"quantile", "equal_width"}:
+        raise ValueError("binning må være 'quantile' eller 'equal_width'.")
+
+    X_train = data["sequences"]["train"]
+    y_train = np.asarray(data["y_class"]["train"])
+    cv_folds = data["cv_folds"]
+    input_size = len(data["sequence_columns"])
+
+    n_events = len(X_train)
+
+    # Hver event fylles inn én gang, når den er validation-data i sin fold.
+    oof_probabilities = np.full(n_events, np.nan, dtype=float)
+    fold_numbers = np.full(n_events, -1, dtype=int)
+
+    # Sekvenslengde = antall CDMs/rader i eventet.
+    sequence_lengths = np.asarray(
+        [len(sequence) for sequence in X_train],
+        dtype=int,
+    )
+
+    for fold_number, (fit_idx, val_idx) in enumerate(cv_folds, start=1):
+        print(f"Trener CV-fold {fold_number}/{len(cv_folds)}")
+
+        X_fit = [X_train[i] for i in fit_idx]
+        X_val = [X_train[i] for i in val_idx]
+
+        y_fit = y_train[fit_idx]
+
+        if class_weight is None:
+            n_positive = np.sum(y_fit == 1)
+            n_negative = np.sum(y_fit == 0)
+
+            current_class_weight = (
+                n_negative / n_positive
+                if n_positive > 0
+                else None
+            )
+        else:
+            current_class_weight = class_weight
+
+        set_seed(seed + fold_number)
+
+        model = RNNClassifier(
+            input_size=input_size,
+            hidden_layers=hidden_layers,
+            nodes_per_layer=nodes_per_layer,
+            rnn_type=rnn_type,
+            dropout=dropout,
+            device=device,
+        )
+
+        model.fit(
+            X_train=X_fit,
+            y_train=y_fit,
+            X_val=X_val,
+            y_val=y_train[val_idx],
+            epochs=epochs,
+            batch_size=batch_size,
+            optimizer=optimizer,
+            learning_rate=learning_rate,
+            class_weight=current_class_weight,
+            penalty=penalty,
+            penalty_strength=penalty_strength,
+            verbose=False,
+        )
+
+        oof_probabilities[val_idx] = model.predict_proba(
+            X_val,
+            batch_size=batch_size,
+        )
+        fold_numbers[val_idx] = fold_number
+
+    if np.isnan(oof_probabilities).any():
+        raise RuntimeError(
+            "Noen events mangler out-of-fold-prediksjon. "
+            "Sjekk at CV-foldene dekker alle training-events."
+        )
+
+    event_results = pd.DataFrame(
+        {
+            "sequence_length": sequence_lengths,
+            "y_true": y_train,
+            "y_probability": oof_probabilities,
+            "fold": fold_numbers,
+        }
+    )
+
+    # Gruppér sekvenslengdene.
+    if binning == "quantile":
+        # duplicates="drop" håndterer dersom mange events har samme lengde.
+        event_results["length_bin"] = pd.qcut(
+            event_results["sequence_length"],
+            q=n_bins,
+            duplicates="drop",
+        )
+    else:
+        event_results["length_bin"] = pd.cut(
+            event_results["sequence_length"],
+            bins=n_bins,
+            include_lowest=True,
+        )
+
+    rows = []
+
+    for length_bin, group in event_results.groupby(
+        "length_bin",
+        observed=True,
+    ):
+        y_group = group["y_true"].to_numpy()
+        p_group = group["y_probability"].to_numpy()
+
+        # AUC er ikke definert dersom gruppen bare har én klasse.
+        if len(np.unique(y_group)) < 2:
+            auc = np.nan
+        else:
+            auc = roc_auc_score(y_group, p_group)
+
+        # Unweighted BCE / log loss. clip beskytter mot log(0).
+        probabilities_clipped = np.clip(
+            p_group,
+            1e-7,
+            1 - 1e-7,
+        )
+
+        bce_loss = log_loss(
+            y_group,
+            probabilities_clipped,
+            labels=[0, 1],
+        )
+
+        rows.append(
+            {
+                "length_bin": str(length_bin),
+                "mean_sequence_length": group["sequence_length"].mean(),
+                "min_sequence_length": group["sequence_length"].min(),
+                "max_sequence_length": group["sequence_length"].max(),
+                "n_events": len(group),
+                "n_positive": int(y_group.sum()),
+                "auc": auc,
+                "bce_loss": bce_loss,
+            }
+        )
+
+    summary = pd.DataFrame(rows)
+
+    # Sorterer intervallene etter faktisk gjennomsnittlig sekvenslengde.
+    summary = summary.sort_values(
+        "mean_sequence_length",
+    ).reset_index(drop=True)
+
+    x = np.arange(len(summary))
+
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=2,
+        figsize=(15, 5),
+    )
+
+    # ROC-AUC
+    axes[0].bar(
+        x,
+        summary["auc"],
+        color="steelblue",
+        edgecolor="black",
+    )
+    axes[0].set_ylim(0.0, 1.0)
+    axes[0].set_title("Out-of-fold ROC-AUC etter sekvenslengde")
+    axes[0].set_xlabel("Sekvenslengdegruppe, antall CDMs")
+    axes[0].set_ylabel("ROC-AUC")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(
+        summary["length_bin"],
+        rotation=30,
+        ha="right",
+    )
+    axes[0].grid(axis="y", alpha=0.3)
+
+    # Binary cross-entropy
+    axes[1].bar(
+        x,
+        summary["bce_loss"],
+        color="indianred",
+        edgecolor="black",
+    )
+    axes[1].set_title("Out-of-fold BCE-loss etter sekvenslengde")
+    axes[1].set_xlabel("Sekvenslengdegruppe, antall CDMs")
+    axes[1].set_ylabel("Binary cross-entropy loss")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(
+        summary["length_bin"],
+        rotation=30,
+        ha="right",
+    )
+    axes[1].grid(axis="y", alpha=0.3)
+
+    # Vis antall events og antall positive over hver søyle.
+    for axis, values in zip(
+        axes,
+        [summary["auc"], summary["bce_loss"]],
+    ):
+        for i, value in enumerate(values):
+            if not np.isnan(value):
+                axis.text(
+                    i,
+                    value,
+                    f"n={summary.loc[i, 'n_events']}\n"
+                    f"pos={summary.loc[i, 'n_positive']}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                )
+
+    plt.tight_layout()
+    plt.show()
+
+    return event_results, summary

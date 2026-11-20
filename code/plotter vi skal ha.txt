@@ -23,7 +23,7 @@ FOR NNS:
         number of hidden layers : [1, 2, 3]
 
     Optimizers:
-        architechture: inputs: 100: 100: output
+        architechture: inputs: 100: output
         Adam
         RMSprop
         plain
@@ -31,7 +31,7 @@ FOR NNS:
         step size: 0.001, batch size = 100, epochs = 20
 
     Cross validation as a function of learning rate and penalty:
-        architechture: inputs: 100: 100: output
+        architechture: inputs: 100: output
         step sizes: [0.0001, 0.001, 0.01]
         penalty term: [10^-5, 10^-4, 10^-3] #Det kan hende vi fordanrer disse veridene hvis det er alt for stort/lite
 
