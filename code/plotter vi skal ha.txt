@@ -4,6 +4,8 @@ precicion- recall curve
 
 classification weight (sum of y=0)/(sum of y=1)
 
+Make each plot equivalent. The plots from RNN_model is already made, so design them similary.
+
 FOR NNS:
     test hyperparametere:
     activation function, initialisation, for NN with architechture: input: 100: 100: output
