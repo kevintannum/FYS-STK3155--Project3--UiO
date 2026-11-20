@@ -2,7 +2,7 @@ ROC curve
 AUC
 precicion- recall curve
 
-
+classification weight (sum of y=0)/(sum of y=1)
 
 FOR NNS:
     test hyperparametere:
@@ -38,4 +38,4 @@ FOR NNS:
 
 
 Bare for RNNS:
-    plotte loss som funksjon av lengde av sekvenser, og plassering innenfor sekvens.
+plotte loss som funksjon av lengde av sekvenser, og plassering innenfor sekvens.
