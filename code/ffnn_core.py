@@ -333,25 +333,36 @@ def l2_penalty(model: nn.Module) -> torch.Tensor:
     return sum((w ** 2).sum() for w in weight_matrices(model))
 
 
-def make_optimizer(model: nn.Module, lr: float, weight_decay: float = 0.0):
-    """AdamW with weight decay applied to weights but **not** biases.
+def make_optimizer(model: nn.Module, lr: float, weight_decay: float = 0.0,
+                   optimizer: str = "adamw"):
+    """Build the optimiser; ``weight_decay`` hits weights but **not** biases.
 
     PyTorch applies ``weight_decay`` to every parameter by default, biases
     included. Splitting the parameters into two groups keeps the implementation
     consistent with the theory, where the penalty term sums over ``W`` only.
+
+    ``optimizer`` is one of ``"adamw"`` (default), ``"adam"``, ``"rmsprop"`` or
+    ``"sgd"`` (plain gradient descent: no momentum, no adaptive step).
     """
     decay, no_decay = [], []
     for module in model.modules():
         if isinstance(module, nn.Linear):
             decay.append(module.weight)
             no_decay.append(module.bias)
-    return torch.optim.AdamW(
-        [
-            {"params": decay, "weight_decay": weight_decay},
-            {"params": no_decay, "weight_decay": 0.0},
-        ],
-        lr=lr,
-    )
+    groups = [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+    name = optimizer.lower()
+    if name == "adamw":
+        return torch.optim.AdamW(groups, lr=lr)
+    if name == "adam":
+        return torch.optim.Adam(groups, lr=lr)
+    if name == "rmsprop":
+        return torch.optim.RMSprop(groups, lr=lr)
+    if name in ("sgd", "plain"):
+        return torch.optim.SGD(groups, lr=lr)
+    raise ValueError(f"unknown optimizer {optimizer!r}; expected adamw, adam, rmsprop or sgd")
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +398,7 @@ def train_model(
     weight_decay: float = 0.0,
     l1_lambda: float = 0.0,
     l2_lambda: float = 0.0,
+    optimizer: str = "adamw",
     batch_size: int = 64,
     max_epochs: int = 200,
     patience: int = 20,
@@ -394,7 +406,7 @@ def train_model(
     device: torch.device | None = None,
     verbose: bool = False,
 ):
-    """Train with mini-batch AdamW and early stopping; return ``(model, history)``.
+    """Train with a mini-batch optimiser (AdamW by default) and early stopping; return ``(model, history)``.
 
     Parameters
     ----------
@@ -441,7 +453,8 @@ def train_model(
     else:
         raise ValueError(f"unknown loss_name {loss_name!r}")
 
-    optimizer = make_optimizer(model, lr=lr, weight_decay=weight_decay)
+    opt_name = optimizer
+    optimizer = make_optimizer(model, lr=lr, weight_decay=weight_decay, optimizer=opt_name)
     train_loader = make_loader(X_train, y_train, batch_size, shuffle=True, device=device)
 
     if has_val:
@@ -592,6 +605,8 @@ class TorchFFNNClassifier(BaseEstimator, ClassifierMixin):
         lr: float = 1e-3,
         weight_decay: float = 0.0,
         l1_lambda: float = 0.0,
+        l2_lambda: float = 0.0,
+        optimizer: str = "adamw",
         batch_size: int = 64,
         max_epochs: int = 200,
         patience: int = 20,
@@ -611,6 +626,8 @@ class TorchFFNNClassifier(BaseEstimator, ClassifierMixin):
         self.lr = lr
         self.weight_decay = weight_decay
         self.l1_lambda = l1_lambda
+        self.l2_lambda = l2_lambda
+        self.optimizer = optimizer
         self.batch_size = batch_size
         self.max_epochs = max_epochs
         self.patience = patience
@@ -659,6 +676,7 @@ class TorchFFNNClassifier(BaseEstimator, ClassifierMixin):
             task="classification", loss_name=self.loss_name, pos_weight=pw,
             f2_lambda=self.f2_lambda, focal_gamma=self.focal_gamma,
             lr=self.lr, weight_decay=self.weight_decay, l1_lambda=self.l1_lambda,
+            l2_lambda=self.l2_lambda, optimizer=self.optimizer,
             batch_size=self.batch_size, max_epochs=self.max_epochs,
             patience=self.patience, grad_clip=self.grad_clip, device=device,
         )
