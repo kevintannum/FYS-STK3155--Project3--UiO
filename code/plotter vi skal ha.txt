@@ -33,3 +33,25 @@ FOR NNS:
 
 Bare for RNNS:
 plotte loss som funksjon av lengde av sekvenser, og plassering innenfor sekvens.
+
+
+
+
+Jon's RNN notebook builds its data with include_current_risk=False. To include risk, he only needs to change that one setting.
+
+In the data cell of RNN_model.ipynb, change the argument to True:
+
+
+data = build_shared_datasets(
+    include_current_risk=True,    # was False
+    variance_threshold=0.95,
+    seed=3155,
+)
+risk, max_risk_estimate and max_risk_scaling then show up as extra columns at every time step in data["sequences"]. The next cell sets input_size = len(data["sequence_columns"]), 
+so the model picks up the extra inputs automatically. Nothing else in the data code changes.
+
+Re-run the notebook top to bottom. That includes the training cell and the last cell that saves results/predictions/rnn.npz.
+
+Re-check the decision threshold. The saving cell uses THRESHOLD = 0.01, which was chosen without risk. With risk the probabilities will probably sit on a different scale, so he should pick a threshold from out-of-fold predictions, not reuse 0.01.
+
+If we want to keep both versions, he should save the with-risk run under a different name, for example rnn_with_risk.npz. Then I'd add it to MODELS in comparisons.ipynb, so the comparison can show both regimes.
